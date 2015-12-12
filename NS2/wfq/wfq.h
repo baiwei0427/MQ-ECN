@@ -10,8 +10,8 @@
 #include <queue>
 using namespace std;
 
-/*We can use 32 queuess at most */
-#define WFQ_MAX_QUEUES 32
+/*Maximum queue number */
+#define WFQ_MAX_QUEUES 64
 
 /* Per-queue ECN marking */
 #define PER_QUEUE_MARKING 0
@@ -19,6 +19,8 @@ using namespace std;
 #define PER_PORT_MARKING 1
 /* MQ-ECN for any packet scheduling algorithms */
 #define MQ_MARKING_GENER 2
+/* Dequeue latency-based ECN marking */
+#define LATENCY_MARKING 4
 
 class WFQ;
 
