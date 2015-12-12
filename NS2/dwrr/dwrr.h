@@ -7,7 +7,7 @@
 #include "timer-handler.h"
 
 /*Maximum queue number */
-#define MAX_QUEUE_NUM 32
+#define MAX_QUEUE_NUM 64
 
 /* Per-queue ECN marking */
 #define PER_QUEUE_MARKING 0
@@ -17,6 +17,8 @@
 #define MQ_MARKING_GENER 2
 /* MQ-ECN for round robin packet scheduling algorithms */
 #define MQ_MARKING_RR 3
+/* Dequeue latency-based ECN marking */
+#define LATENCY_MARKING 4
 
 class PacketDWRR;
 class DWRR;
@@ -79,7 +81,7 @@ class DWRR : public Queue
 		double port_thresh_;	//per-port ECN marking threshold (pkts)
 		int marking_scheme_;	//ECN marking policy
 		double estimate_round_alpha_;	//factor between 0 and 1 for round time estimation
-		int estimate_round_idle_interval_bytes_;	//Time interval (divided by link capacity) to update round time when link is idle. 
+		int estimate_round_idle_interval_bytes_;	//Time interval (divided by link capacity) to update round time when link is idle.
 		double estimate_quantum_alpha_;	//factor between 0 and 1 for quantum estimation
 		int estimate_quantum_interval_bytes_;	//Time interval is estimate_quantum_interval_bytes_/link capacity.
 		int estimate_quantum_enable_timer_;	//Whether we use real timer (TimerHandler) for quantum estimation
