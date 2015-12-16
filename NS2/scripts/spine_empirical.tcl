@@ -29,8 +29,7 @@ set slowstartrestart [lindex $argv 14]
 set DCTCP_g [lindex $argv 15] ;	# DCTCP alpha estimation gain
 set min_rto [lindex $argv 16]
 #### Switch side options
-#per-queue standard (0), per-port (1), our dynamic per-queue algorithm (2),
-#our dynamic hybrid algorithm (3) and per-queue min (4)
+#per-queue standard (0), per-port (1), MQ-ECN Gener (2), MQ-ECN RR (3), latency marking (4) and per-queue min (5)
 set ECN_scheme [lindex $argv 17]
 set DCTCP_K [lindex $argv 18]
 set switchAlg [lindex $argv 19]
@@ -78,7 +77,7 @@ puts "Flow size distribution CDF file $flow_cdf"
 puts " "
 
 ################# Transport Options ####################
-Agent/TCP set windowInit_ 10
+Agent/TCP set windowInit_ 16
 Agent/TCP set window_ 1256
 Agent/TCP set ecn_ 1
 Agent/TCP set old_ecn_ 1
@@ -90,6 +89,7 @@ Agent/TCP set slow_start_restart_ $slowstartrestart
 Agent/TCP set windowOption_ 0
 Agent/TCP set tcpTick_ 0.000001
 Agent/TCP set minrto_ $min_rto
+Agent/TCP set rtxcur_init_ $min_rto;    #RTO init value
 Agent/TCP set maxrto_ 64
 
 Agent/TCP/FullTcp set nodelay_ true; # disable Nagle
@@ -130,11 +130,11 @@ Queue/WRR set mean_pktsize_ [expr $pktSize+40]
 Queue/WRR set port_thresh_ $DCTCP_K
 Queue/WRR set estimate_pktsize_alpha_ 0.75
 Queue/WRR set estimate_round_alpha_ 0.75
-Queue/WRR set estimate_round_filter_ false
+Queue/WRR set estimate_round_idle_interval_bytes_ [expr $pktSize+40]
 Queue/WRR set link_capacity_ $link_rate$link_capacity_unit
 Queue/WRR set debug_ false
 
-if {$ECN_scheme!=4} {
+if {$ECN_scheme !=5} {
 	Queue/DWRR set marking_scheme_ $ECN_scheme
 	Queue/WFQ set marking_scheme_ $ECN_scheme
 	Queue/WRR set marking_scheme_ $ECN_scheme
@@ -193,8 +193,8 @@ for {set i 0} {$i < $S} {incr i} {
 			$q set-weight $service_i $wfq_weight
 		}
 
-		#MQ_MARKING_GENER (2), MQ_MARKING_RR (3) and Per-queue Minimum (4)
-		if {$ECN_scheme>=2} {
+		#MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
+		if {$ECN_scheme >= 2} {
 			$q set-thresh $service_i [expr $DCTCP_K/$service_num]
 		} else {
 			$q set-thresh $service_i [expr $DCTCP_K]
@@ -214,8 +214,8 @@ for {set i 0} {$i < $S} {incr i} {
 			$q set-weight $service_i $wfq_weight
 		}
 
-		#MQ_MARKING_GENER (2), MQ_MARKING_RR (3) and Per-queue Minimum (4)
-		if {$ECN_scheme>=2} {
+		#MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
+		if {$ECN_scheme >= 2} {
 			$q set-thresh $service_i [expr $DCTCP_K/$service_num]
 		} else {
 			$q set-thresh $service_i [expr $DCTCP_K]
@@ -228,7 +228,6 @@ for {set i 0} {$i < $topology_tors} {incr i} {
 		$ns duplex-link $n($i) $a($j) [set UCap]Gb $mean_link_delay $switchAlg
 
 ##### Configure DWRR/WRR/WFQ for core links #####
-
 		set L [$ns link $n($i) $a($j)]
 		set q [$L set queue_]
 		if {[string compare $switchAlg "DWRR"] == 0 || [string compare $switchAlg "WRR"] == 0} {
@@ -244,8 +243,8 @@ for {set i 0} {$i < $topology_tors} {incr i} {
 				$q set-weight $service_i $wfq_weight
 			}
 
-			#MQ_MARKING_GENER (2), MQ_MARKING_RR (3) and Per-queue Minimum (4)
-			if {$ECN_scheme>=2} {
+            #MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
+			if {$ECN_scheme >= 2} {
 				$q set-thresh $service_i [expr $DCTCP_K/$service_num]
 			} else {
 				$q set-thresh $service_i [expr $DCTCP_K]
@@ -267,8 +266,8 @@ for {set i 0} {$i < $topology_tors} {incr i} {
 				$q set-weight $service_i $wfq_weight
 			}
 
-			#MQ_MARKING_GENER (2), MQ_MARKING_RR (3) and Per-queue Minimum (4)
-			if {$ECN_scheme>=2} {
+            #MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
+			if {$ECN_scheme >= 2} {
 				$q set-thresh $service_i [expr $DCTCP_K/$service_num]
 			} else {
 				$q set-thresh $service_i [expr $DCTCP_K]
@@ -305,7 +304,7 @@ for {set j 0} {$j < $S } {incr j} {
 			puts -nonewline "($i,$j) service $service_id"
 			#For Poisson/Pareto
 			$agtagr($i,$j) set_PCarrival_process  [expr $lambda/($S - 1)] $flow_cdf [expr 17*$i+1244*$j] [expr 33*$i+4369*$j]
-			#$ns at 0.1 "$agtagr($i,$j) warmup 0.5 5"
+			$ns at 0.1 "$agtagr($i,$j) warmup 0.5 5"
 			$ns at 1 "$agtagr($i,$j) init_schedule"
 
 			set init_fid [expr $init_fid + $connections_per_pair];
