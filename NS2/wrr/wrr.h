@@ -6,14 +6,18 @@
 #include "trace.h"
 
 /*Maximum queue number */
-#define MAX_QUEUE_NUM 32
+#define MAX_QUEUE_NUM 64
 
 /* Per-queue ECN marking */
 #define PER_QUEUE_MARKING 0
 /* Per-port ECN marking */
 #define PER_PORT_MARKING 1
+/* MQ-ECN for any packet scheduling algorithms */
+//#define MQ_MARKING_GENER 2
 /* MQ-ECN for round robin packet scheduling algorithms */
 #define MQ_MARKING_RR 3
+/* Dequeue latency-based ECN marking */
+#define LATENCY_MARKING 4
 
 class PacketWRR;
 class WRR;
@@ -21,7 +25,7 @@ class WRR;
 class PacketWRR: public PacketQueue
 {
 	public:
-		PacketWRR(): quantum(2000),counter(0),thresh(0),start_time(0), counter_updated(false) {}
+		PacketWRR(): quantum(1500), counter(0), thresh(0), start_time(0), counter_updated(false) {}
 
 		int quantum;	//quantum of this queue
 		int counter;	//counter for bytes that can be sent in this round
@@ -43,7 +47,7 @@ class WRR : public Queue
 		Packet *deque(void);
 		void enque(Packet *pkt);
 		int TotalByteLength();	//Get total length of all queues in bytes
-		int MarkingECN(int q); //Determine whether we need to mark ECN, q is current queue number
+		int MarkingECN(int q);	//Determine whether we need to mark ECN, q is current queue number
 
 		/* Variables */
 		PacketWRR *queues;	//underlying multi-FIFO (CoS) queues
