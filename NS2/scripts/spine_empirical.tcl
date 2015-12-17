@@ -44,8 +44,8 @@ set flow_cdf [lindex $argv 24]
 set fct_log [lindex $argv 25]
 
 set pktSize 1460;	#packet size in bytes
-set quantum [expr $pktSize+40];	#quantum for each queue (DWRR)
-set wrr_weight 1; #weight for each queue (WRR)
+set quantum [expr $pktSize + 40];	#quantum for each queue (DWRR)
+set wrr_weight [expr $pktSize + 40]; #weight for each queue (WRR)
 set wfq_weight 100000; #weight for each queue (WFQ)
 set link_capacity_unit Gb
 
@@ -92,14 +92,9 @@ Agent/TCP set minrto_ $min_rto
 Agent/TCP set rtxcur_init_ $min_rto;    #RTO init value
 Agent/TCP set maxrto_ 64
 
-Agent/TCP/FullTcp set nodelay_ true; # disable Nagle
+Agent/TCP/FullTcp set nodelay_ true; #disable Nagle
 Agent/TCP/FullTcp set segsperack_ $ackRatio
 Agent/TCP/FullTcp set interval_ 0
-
-#if {$enableHRTimer != 0} {
-#   Agent/TCP set minrto_ 0.00100 ; # 1ms
-#  Agent/TCP set tcpTick_ 0.000001
-#}
 
 if {[string compare $sourceAlg "DCTCP-Sack"] == 0} {
 	Agent/TCP set dctcp_ true
@@ -110,7 +105,7 @@ if {[string compare $sourceAlg "DCTCP-Sack"] == 0} {
 Queue set limit_ $queueSize
 
 Queue/DWRR set queue_num_ $service_num
-Queue/DWRR set mean_pktsize_ [expr $pktSize+40]
+Queue/DWRR set mean_pktsize_ [expr $pktSize + 40]
 Queue/DWRR set port_thresh_ $DCTCP_K
 Queue/DWRR set estimate_round_alpha_ 0.75
 Queue/DWRR set estimate_quantum_alpha_ 0.75
@@ -120,21 +115,21 @@ Queue/DWRR set link_capacity_ $link_rate$link_capacity_unit
 Queue/DWRR set debug_ false
 
 Queue/WFQ set queue_num_ $service_num
-Queue/WFQ set mean_pktsize_ [expr $pktSize+40]
+Queue/WFQ set mean_pktsize_ [expr $pktSize + 40]
 Queue/WFQ set port_thresh_ $DCTCP_K
 Queue/WFQ set estimate_weight_alpha_ 0.75
 Queue/WFQ set debug_ false
 
 Queue/WRR set queue_num_ $service_num
-Queue/WRR set mean_pktsize_ [expr $pktSize+40]
+Queue/WRR set mean_pktsize_ [expr $pktSize + 40]
 Queue/WRR set port_thresh_ $DCTCP_K
 Queue/WRR set estimate_pktsize_alpha_ 0.75
 Queue/WRR set estimate_round_alpha_ 0.75
-Queue/WRR set estimate_round_idle_interval_bytes_ [expr $pktSize+40]
+Queue/WRR set estimate_round_idle_interval_bytes_ [expr $pktSize + 40]
 Queue/WRR set link_capacity_ $link_rate$link_capacity_unit
 Queue/WRR set debug_ false
 
-if {$ECN_scheme !=5} {
+if {$ECN_scheme != 5} {
 	Queue/DWRR set marking_scheme_ $ECN_scheme
 	Queue/WFQ set marking_scheme_ $ECN_scheme
 	Queue/WRR set marking_scheme_ $ECN_scheme
@@ -149,16 +144,16 @@ if {$ECN_scheme !=5} {
 
 if {$enableMultiPath == 1} {
     $ns rtproto DV
-    Agent/rtProto/DV set advertInterval	[expr 2*$sim_end]
+    Agent/rtProto/DV set advertInterval	[expr 2 * $sim_end]
     Node set multiPath_ 1
     if {$perflowMP != 0} {
-	Classifier/MultiPath set perflow_ 1
+	       Classifier/MultiPath set perflow_ 1
     }
 }
 
 ############# Topoplgy #########################
-set S [expr $topology_spt * $topology_tors] ; #number of servers
-set UCap [expr $link_rate * $topology_spt / $topology_spines / $topology_x] ; #uplink rate
+set S [expr $topology_spt * $topology_tors];    #number of servers
+set UCap [expr $link_rate * $topology_spt / $topology_spines / $topology_x];    #uplink rate
 puts "Total server number: $S"
 puts "Uplink capacity: $UCap Gbps"
 
@@ -175,7 +170,7 @@ for {set i 0} {$i < $topology_spines} {incr i} {
 }
 
 for {set i 0} {$i < $S} {incr i} {
-    set j [expr $i/$topology_spt]
+    set j [expr $i / $topology_spt]
     $ns duplex-link $s($i) $n($j) [set link_rate]Gb [expr $host_delay + $mean_link_delay]  $switchAlg
 
 ##### Configure DWRR/WRR/WFQ for edge links #####
@@ -188,14 +183,14 @@ for {set i 0} {$i < $S} {incr i} {
 		if {[string compare $switchAlg "DWRR"] == 0} {
 			$q set-quantum $service_i $quantum
 		} elseif {[string compare $switchAlg "WRR"] == 0} {
-			$q set-weight $service_i $wrr_weight
+			$q set-quantum $service_i $wrr_weight
 		} elseif {[string compare $switchAlg "WFQ"] == 0} {
 			$q set-weight $service_i $wfq_weight
 		}
 
 		#MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
 		if {$ECN_scheme >= 2} {
-			$q set-thresh $service_i [expr $DCTCP_K/$service_num]
+			$q set-thresh $service_i [expr $DCTCP_K / $service_num]
 		} else {
 			$q set-thresh $service_i [expr $DCTCP_K]
 		}
@@ -209,14 +204,14 @@ for {set i 0} {$i < $S} {incr i} {
 		if {[string compare $switchAlg "DWRR"] == 0} {
 			$q set-quantum $service_i $quantum
 		} elseif {[string compare $switchAlg "WRR"] == 0} {
-			$q set-weight $service_i $wrr_weight
+			$q set-quantum $service_i $wrr_weight
 		} elseif {[string compare $switchAlg "WFQ"] == 0} {
 			$q set-weight $service_i $wfq_weight
 		}
 
 		#MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
 		if {$ECN_scheme >= 2} {
-			$q set-thresh $service_i [expr $DCTCP_K/$service_num]
+			$q set-thresh $service_i [expr $DCTCP_K / $service_num]
 		} else {
 			$q set-thresh $service_i [expr $DCTCP_K]
 		}
@@ -238,14 +233,14 @@ for {set i 0} {$i < $topology_tors} {incr i} {
 			if {[string compare $switchAlg "DWRR"] == 0} {
 				$q set-quantum $service_i $quantum
 			} elseif {[string compare $switchAlg "WRR"] == 0} {
-				$q set-weight $service_i $wrr_weight
+				$q set-quantum $service_i $wrr_weight
 			} elseif {[string compare $switchAlg "WFQ"] == 0} {
 				$q set-weight $service_i $wfq_weight
 			}
 
             #MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
 			if {$ECN_scheme >= 2} {
-				$q set-thresh $service_i [expr $DCTCP_K/$service_num]
+				$q set-thresh $service_i [expr $DCTCP_K / $service_num]
 			} else {
 				$q set-thresh $service_i [expr $DCTCP_K]
 			}
@@ -261,14 +256,14 @@ for {set i 0} {$i < $topology_tors} {incr i} {
 			if {[string compare $switchAlg "DWRR"] == 0} {
 				$q set-quantum $service_i $quantum
 			} elseif {[string compare $switchAlg "WRR"] == 0} {
-				$q set-weight $service_i $wrr_weight
+				$q set-quantum $service_i $wrr_weight
 			} elseif {[string compare $switchAlg "WFQ"] == 0} {
 				$q set-weight $service_i $wfq_weight
 			}
 
             #MQ_MARKING_GENER (2), MQ_MARKING_RR (3), Latency Marking (4) Per-queue Minimum (5)
 			if {$ECN_scheme >= 2} {
-				$q set-thresh $service_i [expr $DCTCP_K/$service_num]
+				$q set-thresh $service_i [expr $DCTCP_K / $service_num]
 			} else {
 				$q set-thresh $service_i [expr $DCTCP_K]
 			}
@@ -278,9 +273,9 @@ for {set i 0} {$i < $topology_tors} {incr i} {
 
 
 #############  Agents          #########################
-set lambda [expr ($link_rate*$load*1000000000)/($meanFlowSize*8.0/1460*1500)]
+set lambda [expr ($link_rate * $load * 1000000000) / ($meanFlowSize * 8.0 / 1460 * 1500)]
 #set lambda [expr ($link_rate*$load*1000000000)/($mean_npkts*($pktSize+40)*8.0)]
-puts "Arrival: Poisson with inter-arrival [expr 1/$lambda * 1000] ms"
+puts "Arrival: Poisson with inter-arrival [expr 1 / $lambda * 1000] ms"
 puts "FlowSize: Pareto with mean = $meanFlowSize, shape = $paretoShape"
 
 puts "Setting up connections ..."; flush stdout
@@ -303,7 +298,7 @@ for {set j 0} {$j < $S } {incr j} {
 
 			puts -nonewline "($i,$j) service $service_id"
 			#For Poisson/Pareto
-			$agtagr($i,$j) set_PCarrival_process  [expr $lambda/($S - 1)] $flow_cdf [expr 17*$i+1244*$j] [expr 33*$i+4369*$j]
+			$agtagr($i,$j) set_PCarrival_process  [expr $lambda / ($S - 1)] $flow_cdf [expr 17 * $i + 1244 * $j] [expr 33 * $i + 4369 * $j]
 			$ns at 0.1 "$agtagr($i,$j) warmup 0.5 5"
 			$ns at 1 "$agtagr($i,$j) init_schedule"
 
