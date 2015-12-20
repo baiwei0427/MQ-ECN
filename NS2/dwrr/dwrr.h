@@ -19,6 +19,10 @@
 #define MQ_MARKING_RR 3
 /* Dequeue latency-based ECN marking */
 #define LATENCY_MARKING 4
+/* PIE-like ECN marking */
+#define PIE_MARKING 5
+
+#define DQ_COUNT_INVALID -1
 
 class PacketDWRR;
 class DWRR;
@@ -36,14 +40,18 @@ protected:
 class PacketDWRR: public PacketQueue
 {
 	public:
-		PacketDWRR(): quantum(1500),deficitCounter(0),thresh(0),active(false),current(false),start_time(0),next(NULL) {}
+		PacketDWRR(): quantum(1500), deficitCounter(0), thresh(0), active(false), current(false), start_time(0), dq_tstamp(0), dq_count(0), avg_dq_rate(0), next(NULL) {}
 
+		int id;	//queue ID
 		int quantum;	//quantum (weight) of this queue
 		int deficitCounter;	//deficit counter for this queue
 		double thresh;	// per-queue ECN marking threshold (pkts)
 		bool active;	//whether this queue is active (qlen>0)
 		bool current;	//whether this queue is currently being served (deficitCounter has been updated for thie round)
 		double start_time;	//time when this queue is inserted to active list
+		double dq_tstamp;	//measurement start time
+		int dq_count;	//measured in bytes
+		double avg_dq_rate;	//average drain rate (bps)
 		PacketDWRR *next;	//pointer to next node
 
 		friend class DWRR;
@@ -85,6 +93,8 @@ class DWRR : public Queue
 		double estimate_quantum_alpha_;	//factor between 0 and 1 for quantum estimation
 		int estimate_quantum_interval_bytes_;	//Time interval is estimate_quantum_interval_bytes_/link capacity.
 		int estimate_quantum_enable_timer_;	//Whether we use real timer (TimerHandler) for quantum estimation
+		int dq_thresh_;	//threshold for departure rate estimation
+		double estimate_rate_alpha_;	//factor between 0 and 1 for departure rate estimation
 		double link_capacity_;	//Link capacity
 		int debug_;	//debug more(true) or not(false)
 

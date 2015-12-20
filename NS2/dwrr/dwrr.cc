@@ -70,6 +70,9 @@ static class DWRRClass : public TclClass
 DWRR::DWRR(): timer_(this)
 {
 	queues = new PacketDWRR[MAX_QUEUE_NUM];
+	for (int i = 0; i < MAX_QUEUE_NUM; i++)
+		queues[i].id = i;
+
 	activeList = new PacketDWRR();
 	round_time = 0;
 	quantum_sum = 0;
@@ -90,21 +93,25 @@ DWRR::DWRR(): timer_(this)
 	estimate_quantum_alpha_ = 0.75;
 	estimate_quantum_interval_bytes_ = 1500;
 	estimate_quantum_enable_timer_ = 0;
+	dq_thresh_ = 10000;
+	estimate_rate_alpha_ = 0.875;
 	link_capacity_ = 10000000000;	//10Gbps
 	debug_ = 0;
 
 	/* bind variables */
 	bind("queue_num_", &queue_num_);
 	bind("mean_pktsize_", &mean_pktsize_);
-	bind("port_thresh_",&port_thresh_);
-	bind("marking_scheme_",&marking_scheme_);
-	bind("estimate_round_alpha_",&estimate_round_alpha_);
-	bind("estimate_round_idle_interval_bytes_",&estimate_round_idle_interval_bytes_);
-	bind("estimate_quantum_alpha_",&estimate_quantum_alpha_);
-	bind("estimate_quantum_interval_bytes_",&estimate_quantum_interval_bytes_);
-	bind_bool("estimate_quantum_enable_timer_",&estimate_quantum_enable_timer_);
-	bind_bw("link_capacity_",&link_capacity_);
-	bind_bool("debug_",&debug_);
+	bind("port_thresh_", &port_thresh_);
+	bind("marking_scheme_", &marking_scheme_);
+	bind("estimate_round_alpha_", &estimate_round_alpha_);
+	bind("estimate_round_idle_interval_bytes_", &estimate_round_idle_interval_bytes_);
+	bind("estimate_quantum_alpha_", &estimate_quantum_alpha_);
+	bind("estimate_quantum_interval_bytes_", &estimate_quantum_interval_bytes_);
+	bind_bool("estimate_quantum_enable_timer_", &estimate_quantum_enable_timer_);
+	bind("dq_thresh_", &dq_thresh_);
+	bind("estimate_rate_alpha_", &estimate_rate_alpha_);
+	bind_bw("link_capacity_", &link_capacity_);
+	bind_bool("debug_", &debug_);
 }
 
 DWRR::~DWRR()
@@ -215,6 +222,20 @@ int DWRR::MarkingECN(int q)
 			thresh = port_thresh_;
 			//For debug
 			//printf("round time: %f threshold: %f\n",round_time, thresh);
+		if (queues[q].byteLength() > thresh * mean_pktsize_)
+			return 1;
+		else
+			return 0;
+	}
+	/* PIE-like ECN marking */
+	else if (marking_scheme_ == PIE_MARKING)
+	{
+		double thresh = 0;
+		if (queues[q].avg_dq_rate >= 0.000000001 && link_capacity_ > 0)
+			thresh = min(queues[q].avg_dq_rate / link_capacity_, 1) * port_thresh_;
+		else
+			thresh = port_thresh_;
+
 		if (queues[q].byteLength() > thresh * mean_pktsize_)
 			return 1;
 		else
@@ -448,7 +469,7 @@ Packet *DWRR::deque(void)
 				if (pktSize <= headNode->deficitCounter)
 				{
 					pkt = headNode->deque();
-					headNode -> deficitCounter -= pktSize;
+					headNode->deficitCounter -= pktSize;
 
 					/* dequeue latency-based ECN marking */
 					if (marking_scheme_ == LATENCY_MARKING)
@@ -468,6 +489,55 @@ Packet *DWRR::deque(void)
 						hc->timestamp() = 0;
 					}
 
+					/* If current queue is about 10KB or more and dq_count is unset
+					 * we have enough packets to calculate the drain rate. Save
+					 * current time as dq_tstamp and start measurement cycle.
+					 */
+					if (headNode->byteLength() >= dq_thresh_ && headNode->dq_count == DQ_COUNT_INVALID)
+					{
+						headNode->dq_tstamp = Scheduler::instance().clock();
+						headNode->dq_count = 0;
+					}
+
+					/* Calculate the average drain rate from this value.  If queue length
+					 * has receded to a small value viz., <= dq_thresh_bytes,reset
+					 * the dq_count to -1 as we don't have enough packets to calculate the
+					 * drain rate anymore The following if block is entered only when we
+					 * have a substantial queue built up (dq_thresh_ bytes or more)
+					 * and we calculate the drain rate for the threshold here.*/
+					if (headNode->dq_count != DQ_COUNT_INVALID)
+					{
+						headNode->dq_count += pktSize;
+						if (headNode->dq_count >= dq_thresh_)
+						{
+							//take transmission time into account
+							double interval = Scheduler::instance().clock() - headNode->dq_tstamp + pktSize * 8 / link_capacity_;
+							double rate = headNode->dq_count * 8 / interval;
+
+							if (headNode->avg_dq_rate == 0)
+								headNode->avg_dq_rate = rate;
+							else
+								headNode->avg_dq_rate = headNode->avg_dq_rate * estimate_rate_alpha_ + rate * (1 - estimate_rate_alpha_);
+
+							/* If the queue has receded below the threshold, we hold
+	 						 * on to the last drain rate calculated, else we reset
+	 					 	 * dq_count to 0 to re-enter the if block when the next
+	 					     * packet is dequeued
+	 					 	 */
+							if (headNode->byteLength() < dq_thresh_)
+								headNode->dq_count = DQ_COUNT_INVALID;
+							else
+							{
+								headNode->dq_count = 0;
+								//take transmission time into account
+								headNode->dq_tstamp = Scheduler::instance().clock() + pktSize * 8 / link_capacity_;
+							}
+
+							if (debug_ && marking_scheme_ == PIE_MARKING)
+								printf("[queue %d] sample departure rate : %.2f average departure rate: %.2f\n", headNode->id, rate, headNode->avg_dq_rate);
+						}
+					}
+
 					/* After dequeue, headNode becomes empty. In such case, we should delete this queue from activeList. */
 					if (headNode->length() == 0)
 					{
@@ -475,7 +545,7 @@ Packet *DWRR::deque(void)
 						round_time = round_time * estimate_round_alpha_ + round_time_sample * (1 - estimate_round_alpha_);
 
 						if (debug_ && marking_scheme_ == MQ_MARKING_RR)
-							printf("sample round time: %.9f round time: %.9f\n",round_time_sample,round_time);
+							printf("sample round time: %.9f round time: %.9f\n", round_time_sample, round_time);
 
 						quantum_sum -= headNode->quantum;
 						headNode = RemoveHeadList(activeList);

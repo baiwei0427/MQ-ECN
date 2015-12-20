@@ -14,7 +14,7 @@ set K_2 10; #The per-queue ECN marking threshold of the third queue
 set W_0 1500; #The weight of the first queue
 set W_1 1500; #The weight of the second queue
 set W_2 1500; #The weight of the third  queue
-set marking_schme 3
+set marking_schme 5
 
 set RTT 0.0001
 set DCTCP_g_ 0.0625
@@ -50,6 +50,8 @@ Queue/DWRR set estimate_quantum_alpha_ 0.75
 Queue/DWRR set estimate_round_idle_interval_bytes_ 1500
 Queue/DWRR set estimate_quantum_interval_bytes_ 1500
 Queue/DWRR set estimate_quantum_enable_timer_ false
+Queue/DWRR set dq_thresh_ 10000
+Queue/DWRR set estimate_rate_alpha_ 0.875
 Queue/DWRR set link_capacity_ $lineRate
 Queue/DWRR set debug_ true
 
