@@ -514,7 +514,7 @@ Packet *DWRR::deque(void)
 							double interval = Scheduler::instance().clock() - headNode->dq_tstamp + pktSize * 8 / link_capacity_;
 							double rate = headNode->dq_count * 8 / interval;
 
-							if (headNode->avg_dq_rate == 0)
+							if (headNode->avg_dq_rate < 0)
 								headNode->avg_dq_rate = rate;
 							else
 								headNode->avg_dq_rate = headNode->avg_dq_rate * estimate_rate_alpha_ + rate * (1 - estimate_rate_alpha_);

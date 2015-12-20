@@ -40,7 +40,7 @@ protected:
 class PacketDWRR: public PacketQueue
 {
 	public:
-		PacketDWRR(): quantum(1500), deficitCounter(0), thresh(0), active(false), current(false), start_time(0), dq_tstamp(0), dq_count(0), avg_dq_rate(0), next(NULL) {}
+		PacketDWRR(): quantum(1500), deficitCounter(0), thresh(0), active(false), current(false), start_time(0), dq_tstamp(0), dq_count(DQ_COUNT_INVALID), avg_dq_rate(-1), next(NULL) {}
 
 		int id;	//queue ID
 		int quantum;	//quantum (weight) of this queue
