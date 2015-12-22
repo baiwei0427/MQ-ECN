@@ -7,7 +7,7 @@ set K_0 4; #The per-queue ECN marking threshold of the first queue
 set K_1 16; #The per-queue ECN marking threshold of the second queue
 set W_0 100000; #The weight of the first queue
 set W_1 400000; #The weight of the second queue
-set marking_schme 2
+set marking_schme 5
 
 set RTT 0.0001
 set DCTCP_g_ 0.0625
@@ -41,6 +41,8 @@ Queue/WFQ set marking_scheme_ $marking_schme
 Queue/WFQ set estimate_weight_alpha_ 0.75
 Queue/WFQ set estimate_weight_interval_bytes_ 1500
 Queue/WFQ set estimate_weight_enable_timer_ false
+Queue/WFQ set dq_thresh_ 10000
+Queue/WFQ set estimate_rate_alpha_ 0.875
 Queue/WFQ set link_capacity_ $lineRate
 Queue/WFQ set debug_ true
 

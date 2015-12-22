@@ -20,17 +20,27 @@ static class WFQClass : public TclClass
 
 WFQ::WFQ(): timer_(this)
 {
+	queues = new PacketWFQ[MAX_QUEUE_NUM];
+
+	currTime = 0;
+	weight_sum_estimate = 0;
+	weight_sum = 0;
+	last_update_time = 0;
+	last_idle_time = 0;
+	init = 0;
+
 	queue_num_ = 8;
 	mean_pktsize_ = 1500;
 	port_thresh_ = 65;
 	marking_scheme_ = 0;
-	weight_sum = 0;
-	weight_sum_estimate = 0;
-	init = 0;
-	last_update_time = 0;
-	last_idle_time = 0;
+	estimate_weight_alpha_ = 0.75;
+	estimate_weight_interval_bytes_ = 1500;
+	estimate_weight_enable_timer_ = 0;
+	dq_thresh_ = 10000;
+	estimate_rate_alpha_ = 0.875;
+	link_capacity_ = 10000000000;
+	debug_ = 0;
 
-	currTime = 0.0;
 	total_qlen_tchan_ = NULL;
 	qlen_tchan_ = NULL;
 
@@ -42,25 +52,15 @@ WFQ::WFQ(): timer_(this)
 	bind("estimate_weight_alpha_", &estimate_weight_alpha_);
 	bind("estimate_weight_interval_bytes_", &estimate_weight_interval_bytes_);
 	bind_bool("estimate_weight_enable_timer_", &estimate_weight_enable_timer_);
+	bind("dq_thresh_", &dq_thresh_);
+	bind("estimate_rate_alpha_", &estimate_rate_alpha_);
 	bind_bw("link_capacity_", &link_capacity_);
 	bind_bool("debug_", &debug_);
-
-	/* Initialize queue states */
-	qs = new QueueState[WFQ_MAX_QUEUES];
-	for (int i = 0; i < WFQ_MAX_QUEUES; i++)
-	{
-		qs[i].q_ = new PacketQueue;
-		qs[i].weight = 10000.0;	//By default, weight is 10000
-		qs[i].thresh = 0.0;
-	}
 }
 
 WFQ::~WFQ()
 {
-	for (int i = 0; i < WFQ_MAX_QUEUES; i++)
-		delete[] qs[i].q_;
-
-	delete[] qs;
+	delete [] queues;
 	timer_.cancel();
 }
 
@@ -87,7 +87,7 @@ int WFQ::TotalByteLength()
 {
 	int result = 0;
 	for (int i = 0; i < queue_num_; i++)
-		result += qs[i].q_->byteLength();
+		result += queues[i].byteLength();
 
 	return result;
 }
@@ -104,7 +104,7 @@ int WFQ::MarkingECN(int q)
 	/* Per-queue ECN marking */
 	if (marking_scheme_ == PER_QUEUE_MARKING)
 	{
-		if (qs[q].q_->byteLength() > qs[q].thresh * mean_pktsize_)
+		if (queues[q].byteLength() > queues[q].thresh * mean_pktsize_)
 			return 1;
 		else
 			return 0;
@@ -122,11 +122,25 @@ int WFQ::MarkingECN(int q)
 	{
 		double thresh = 0;
 		if (weight_sum_estimate >= 0.000000001)
-			thresh = min(qs[q].weight / weight_sum_estimate, 1) * port_thresh_;
+			thresh = min(queues[q].weight / weight_sum_estimate, 1) * port_thresh_;
 		else
 			thresh = port_thresh_;
 
-		if (qs[q].q_->byteLength() > thresh * mean_pktsize_)
+		if (queues[q].byteLength() > thresh * mean_pktsize_)
+			return 1;
+		else
+			return 0;
+	}
+	/* PIE-like ECN marking */
+	else if (marking_scheme_ == PIE_MARKING)
+	{
+		double thresh = 0;
+		if (queues[q].avg_dq_rate > 0 && link_capacity_ > 0)
+			thresh = min(queues[q].avg_dq_rate / link_capacity_, 1) * port_thresh_;
+		else
+			thresh = port_thresh_;
+
+		if (queues[q].byteLength() > thresh * mean_pktsize_)
 			return 1;
 		else
 			return 0;
@@ -144,7 +158,7 @@ int WFQ::MarkingECN(int q)
  *   - $q set-weight queue_id queue_weight
  *   - $q set-thresh queue_id queue_thresh
  *   - $q attach-total file
- *	  - $q attach-queue file
+ *	 - $q attach-queue file
  *
  *  NOTE: $q represents the discipline queue variable in OTcl.
  */
@@ -185,12 +199,12 @@ int WFQ::command(int argc, const char*const* argv)
 		if (strcmp(argv[1], "set-weight") == 0)
 		{
 			int queue_id = atoi(argv[2]);
-			if (queue_id < min(queue_num_, WFQ_MAX_QUEUES) && queue_id >= 0)
+			if (queue_id < min(queue_num_, MAX_QUEUE_NUM) && queue_id >= 0)
 			{
 				double weight = atof(argv[3]);
 				if (weight > 0)
 				{
-					qs[queue_id].weight = weight;
+					queues[queue_id].weight = weight;
 					return (TCL_OK);
 				}
 				else
@@ -214,7 +228,7 @@ int WFQ::command(int argc, const char*const* argv)
 				double thresh = atof(argv[3]);
 				if (thresh >= 0)
 				{
-					qs[queue_id].thresh = thresh;
+					queues[queue_id].thresh = thresh;
 					return (TCL_OK);
 				}
 				else
@@ -243,7 +257,7 @@ void WFQ::enque(Packet *p)
 	hdr_cmn* hc = hdr_cmn::access(p);
 	int pktSize = hc->size();
 	int qlimBytes = qlim_ * mean_pktsize_;
-	queue_num_ = min(queue_num_, WFQ_MAX_QUEUES);
+	queue_num_ = min(queue_num_, MAX_QUEUE_NUM);
 
 	if (init == 0)
 	{
@@ -279,13 +293,13 @@ void WFQ::enque(Packet *p)
 		prio = queue_num_ - 1;
 
 	/* If queue for the flow is empty, calculate headFinishTime and currTime */
-	if (qs[prio].q_->length() == 0)
+	if (queues[prio].length() == 0)
 	{
-		weight_sum += qs[prio].weight;
-		if (qs[prio].weight > 0)
+		weight_sum += queues[prio].weight;
+		if (queues[prio].weight > 0)
 		{
-			qs[prio].headFinishTime = currTime + pktSize / qs[prio].weight ;
-			currTime = qs[prio].headFinishTime;
+			queues[prio].headFinishTime = currTime + pktSize / queues[prio].weight ;
+			currTime = queues[prio].headFinishTime;
 		}
 		/* In theory, weight should never be zero or negative */
 		else
@@ -296,7 +310,7 @@ void WFQ::enque(Packet *p)
 	}
 
 	/* Enqueue ECN marking */
-	qs[prio].q_->enque(p);
+	queues[prio].enque(p);
 	if (marking_scheme_ != LATENCY_MARKING && MarkingECN(prio) > 0 && hf->ect())
 		hf->ce() = 1;
 	/* For dequeue latency ECN marking ,record enqueue timestamp here */
@@ -316,6 +330,7 @@ Packet *WFQ::deque(void)
 	int queue = -1;
 	double sojourn_time = 0;
 	double latency_thresh = 0;
+	int pktSize = 0;
 
 	/* Switch port is not empty */
 	if (TotalByteLength() > 0)
@@ -323,13 +338,13 @@ Packet *WFQ::deque(void)
 		/* look for the candidate queue with the earliest virtual finish time */
 		for (int i = 0; i < queue_num_; i++)
 		{
-			if (qs[i].q_->length() == 0)
+			if (queues[i].length() == 0)
 				continue;
 
-			if (qs[i].headFinishTime < minT)
+			if (queues[i].headFinishTime < minT)
 			{
 				queue = i;
-				minT = qs[i].headFinishTime;
+				minT = queues[i].headFinishTime;
 			}
 		}
 
@@ -339,7 +354,8 @@ Packet *WFQ::deque(void)
 			exit(1);
 		}
 
-		pkt = qs[queue].q_->deque();
+		pkt = queues[queue].deque();
+		pktSize = hdr_cmn::access(pkt)->size();
 		/* dequeue latency-based ECN marking */
 		if (marking_scheme_ == LATENCY_MARKING)
 		{
@@ -357,16 +373,66 @@ Packet *WFQ::deque(void)
 			}
 			hc->timestamp() = 0;
 		}
-		
+
+		/* If current queue is about 10KB or more and dq_count is unset
+		 * we have enough packets to calculate the drain rate. Save
+		 * current time as dq_tstamp and start measurement cycle.
+		 */
+		if (queues[queue].byteLength() >= dq_thresh_ && queues[queue].dq_count == DQ_COUNT_INVALID)
+		{
+			queues[queue].dq_tstamp = Scheduler::instance().clock();
+			queues[queue].dq_count = 0;
+		}
+
+		/* Calculate the average drain rate from this value.  If queue length
+		 * has receded to a small value viz., <= dq_thresh_bytes,reset
+		 * the dq_count to -1 as we don't have enough packets to calculate the
+		 * drain rate anymore The following if block is entered only when we
+		 * have a substantial queue built up (dq_thresh_ bytes or more)
+		 * and we calculate the drain rate for the threshold here.*/
+		if (queues[queue].dq_count != DQ_COUNT_INVALID)
+		{
+			queues[queue].dq_count += pktSize;
+			if (queues[queue].dq_count >= dq_thresh_)
+			{
+				//take transmission time into account
+				double interval = Scheduler::instance().clock() - queues[queue].dq_tstamp + pktSize * 8 / link_capacity_;
+				double rate = queues[queue].dq_count * 8 / interval;
+
+				//initialize avg_dq_rate for this queue
+				if (queues[queue].avg_dq_rate < 0)
+					queues[queue].avg_dq_rate = rate;
+				else
+					queues[queue].avg_dq_rate = queues[queue].avg_dq_rate * estimate_rate_alpha_ + rate * (1 - estimate_rate_alpha_);
+
+				/* If the queue has receded below the threshold, we hold
+				 * on to the last drain rate calculated, else we reset
+				 * dq_count to 0 to re-enter the if block when the next
+				 * packet is dequeued
+				 */
+				if (queues[queue].byteLength() < dq_thresh_)
+					queues[queue].dq_count = DQ_COUNT_INVALID;
+				else
+				{
+					queues[queue].dq_count = 0;
+					//take transmission time into account
+					queues[queue].dq_tstamp = Scheduler::instance().clock() + pktSize * 8 / link_capacity_;
+				}
+
+				if (debug_ && marking_scheme_ == PIE_MARKING)
+					printf("[queue %d] sample departure rate : %.2f average departure rate: %.2f\n", queue, rate, queues[queue].avg_dq_rate);
+			}
+		}
+
 		/* Set the headFinishTime for the remaining head packet in the queue */
-		nextPkt = qs[queue].q_->head();
+		nextPkt = queues[queue].head();
 		if (nextPkt != NULL)
 		{
-			if (qs[queue].weight > 0)
+			if (queues[queue].weight > 0)
 			{
-				qs[queue].headFinishTime = qs[queue].headFinishTime + (hdr_cmn::access(nextPkt)->size()) / qs[queue].weight;
-				if (currTime < qs[queue].headFinishTime)
-					currTime = qs[queue].headFinishTime;
+				queues[queue].headFinishTime = queues[queue].headFinishTime + (hdr_cmn::access(nextPkt)->size()) / queues[queue].weight;
+				if (currTime < queues[queue].headFinishTime)
+					currTime = queues[queue].headFinishTime;
 			}
 			else
 			{
@@ -377,8 +443,8 @@ Packet *WFQ::deque(void)
 		/* After dequeue, the queue becomes empty */
 		else
 		{
-			weight_sum -= qs[queue].weight;
-			qs[queue].headFinishTime = LDBL_MAX;
+			weight_sum -= queues[queue].weight;
+			queues[queue].headFinishTime = LDBL_MAX;
 		}
 	}
 
@@ -430,9 +496,9 @@ void WFQ::trace_qlen()
 		wrk[n] = 0;
 		(void)Tcl_Write(qlen_tchan_, wrk, n);
 
-		for (int i = 0; i < min(queue_num_, WFQ_MAX_QUEUES); i++)
+		for (int i = 0; i < min(queue_num_, MAX_QUEUE_NUM); i++)
 		{
-			sprintf(wrk, ", %d",qs[i].q_->byteLength());
+			sprintf(wrk, ", %d",queues[i].byteLength());
 			n = strlen(wrk);
 			wrk[n] = 0;
 			(void)Tcl_Write(qlen_tchan_, wrk, n);

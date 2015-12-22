@@ -10,8 +10,8 @@
 #include <queue>
 using namespace std;
 
-/*Maximum queue number */
-#define WFQ_MAX_QUEUES 64
+/* Maximum queue number */
+#define MAX_QUEUE_NUM 64
 
 /* Per-queue ECN marking */
 #define PER_QUEUE_MARKING 0
@@ -21,25 +21,37 @@ using namespace std;
 #define MQ_MARKING_GENER 2
 /* Dequeue latency-based ECN marking */
 #define LATENCY_MARKING 4
+/* PIE-like ECN marking */
+#define PIE_MARKING 5
+
+#define DQ_COUNT_INVALID -1
 
 class WFQ;
+class PacketWFQ;
 
 class WFQ_Timer : public TimerHandler
 {
 public:
-	WFQ_Timer(WFQ *q) : TimerHandler() { queue_=q;}
+	WFQ_Timer(WFQ *q) : TimerHandler() { queue_ = q;}
 
 protected:
 	virtual void expire(Event *e);
 	WFQ *queue_;
 };
 
-struct QueueState
+class PacketWFQ : public PacketQueue
 {
-	PacketQueue* q_;	// Packet queue associated to the corresponding service
-	double weight;	// Weight of the service
-  	long double headFinishTime;	// Finish time of the packet at head of this queue.
-	double thresh;	// Per-queue ECN marking threshold (pkts)
+	public:
+		PacketWFQ(): weight(10000.0), headFinishTime(0), thresh(0), dq_tstamp(0), dq_count(DQ_COUNT_INVALID), avg_dq_rate(-1) {}
+
+		double weight;	//weight of the service
+  		long double headFinishTime;	//finish time of the packet at head of this queue.
+		double thresh;	//per-queue ECN marking threshold (pkts)
+		double dq_tstamp;	//measurement start time
+		int dq_count;	//measured in bytes
+		double avg_dq_rate;	//average drain rate (bps)
+
+		friend class WFQ;
 };
 
 class WFQ : public Queue
@@ -58,7 +70,7 @@ class WFQ : public Queue
 		int MarkingECN(int q); // Determine whether we need to mark ECN, q is current queue number
 
 		/* Variables */
-		struct QueueState *qs;	// Underlying multi-FIFO (CoS) queues and their states
+		struct PacketWFQ *queues;	// Underlying multi-FIFO (CoS) queues
 		long double currTime;	//Finish time assigned to last packet
 		WFQ_Timer timer_;	//Underlying timer for weight_sum_estimate update
 		double weight_sum_estimate;	//estimation value for sum of weights of all non-empty  queues
@@ -67,13 +79,15 @@ class WFQ : public Queue
 		double last_idle_time;	//Last time when link becomes idle
 		int init;	//whether the timer has been started
 
-		int queue_num_;	// Number of queues
-		int mean_pktsize_;	// MTU in bytes
-		double port_thresh_;	// Per-port ECN marking threshold (pkts)
-		int marking_scheme_;	// ECN marking policy
+		int queue_num_;	//number of queues
+		int mean_pktsize_;	//MTU in bytes
+		double port_thresh_;	//per-port ECN marking threshold (pkts)
+		int marking_scheme_;	//ECN marking policy
 		double estimate_weight_alpha_;	//factor between 0 and 1 for weight estimation
-		double estimate_weight_interval_bytes_;	//Time interval is estimate_weight_interval_bytes_/link capacity.
-		int estimate_weight_enable_timer_;	//Whether we use real timer (TimerHandler) for weight estimation
+		double estimate_weight_interval_bytes_;	//time interval is estimate_weight_interval_bytes_/link capacity.
+		int estimate_weight_enable_timer_;	//whether we use real timer (TimerHandler) for weight estimation
+		int dq_thresh_;	//threshold for departure rate estimation
+		double estimate_rate_alpha_;	//factor between 0 and 1 for departure rate estimation
 		double link_capacity_;	//Link capacity
 		int debug_;	//debug more(true) or not(false)
 
