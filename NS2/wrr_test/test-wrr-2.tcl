@@ -48,8 +48,8 @@ Queue/WRR set marking_scheme_ $marking_schme
 Queue/WRR set estimate_pktsize_alpha_ 0.75
 Queue/WRR set estimate_round_alpha_ 0.75
 Queue/WRR set estimate_round_idle_interval_bytes_ [expr $packetSize+40]
-Queue/DWRR set dq_thresh_ 10000
-Queue/DWRR set estimate_rate_alpha_ 0.875
+Queue/WRR set dq_thresh_ 10000
+Queue/WRR set estimate_rate_alpha_ 0.875
 Queue/WRR set link_capacity_ $lineRate
 Queue/WRR set debug_ true
 
