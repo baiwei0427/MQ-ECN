@@ -9,7 +9,7 @@ set MSS_0 1460;	#MSS for service 0
 set MSS_1 1460;	#MSS for service 1
 set W_0 2000; #The weight of the first queue
 set W_1 4000; #The weight of the second queue
-set marking_schme 3
+set marking_schme 5
 
 set RTT 0.0001
 set DCTCP_g_ 0.0625
@@ -43,6 +43,8 @@ Queue/WRR set marking_scheme_ $marking_schme
 Queue/WRR set estimate_pktsize_alpha_ 0.75
 Queue/WRR set estimate_round_alpha_ 0.75
 Queue/WRR set estimate_round_idle_interval_bytes_ [expr $packetSize+40]
+Queue/DWRR set dq_thresh_ 10000
+Queue/DWRR set estimate_rate_alpha_ 0.875
 Queue/WRR set link_capacity_ $lineRate
 Queue/WRR set debug_ true
 

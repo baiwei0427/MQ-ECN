@@ -21,6 +21,7 @@ static class WRRClass : public TclClass
 WRR::WRR()
 {
 	queues = new PacketWRR[MAX_QUEUE_NUM];
+
 	round_time = 0;
 	last_idle_time = 0;
 	init = false;
@@ -36,6 +37,8 @@ WRR::WRR()
 	estimate_round_alpha_ = 0.75;
 	estimate_round_idle_interval_bytes_ = 1500;
 	link_capacity_ = 10000000000;
+	dq_thresh_ = 10000;
+	estimate_rate_alpha_ = 0.875;
 	debug_ = 0;
 
 	/* bind variables */
@@ -45,6 +48,8 @@ WRR::WRR()
 	bind("marking_scheme_", &marking_scheme_);
 	bind("estimate_round_alpha_", &estimate_round_alpha_);
 	bind("estimate_round_idle_interval_bytes_", &estimate_round_idle_interval_bytes_);
+	bind("dq_thresh_", &dq_thresh_);
+	bind("estimate_rate_alpha_", &estimate_rate_alpha_);
 	bind_bw("link_capacity_", &link_capacity_);
 	bind_bool("debug_", &debug_);
 }
@@ -102,6 +107,20 @@ int WRR::MarkingECN(int q)
 		//For debug
 		if(debug_)
 			printf("round time: %.9f threshold of queue %d: %f\n", round_time, q, thresh);
+
+		if (queues[q].byteLength() > thresh * mean_pktsize_)
+			return 1;
+		else
+			return 0;
+	}
+	/* PIE-like ECN marking */
+	else if (marking_scheme_ == PIE_MARKING)
+	{
+		double thresh = 0;
+		if (queues[q].avg_dq_rate > 0 && link_capacity_ > 0)
+			thresh = min(queues[q].avg_dq_rate / link_capacity_, 1) * port_thresh_;
+		else
+			thresh = port_thresh_;
 
 		if (queues[q].byteLength() > thresh * mean_pktsize_)
 			return 1;
@@ -271,7 +290,6 @@ void WRR::enque(Packet *p)
 
 Packet *WRR::deque(void)
 {
-	PacketWRR *headNode = NULL;
 	Packet *pkt = NULL;
 	hdr_flags* hf = NULL;
 	hdr_cmn* hc = NULL;
@@ -321,10 +339,60 @@ Packet *WRR::deque(void)
 						hc->timestamp() = 0;
 					}
 
+					/* If current queue is about 10KB or more and dq_count is unset
+					 * we have enough packets to calculate the drain rate. Save
+					 * current time as dq_tstamp and start measurement cycle.
+					 */
+					if (queues[current].byteLength() >= dq_thresh_ && queues[current].dq_count == DQ_COUNT_INVALID)
+					{
+						queues[current].dq_tstamp = Scheduler::instance().clock();
+						queues[current].dq_count = 0;
+					}
+
+					/* Calculate the average drain rate from this value.  If queue length
+					 * has receded to a small value viz., <= dq_thresh_bytes,reset
+					 * the dq_count to -1 as we don't have enough packets to calculate the
+					 * drain rate anymore The following if block is entered only when we
+					 * have a substantial queue built up (dq_thresh_ bytes or more)
+					 * and we calculate the drain rate for the threshold here.*/
+					if (queues[current].dq_count != DQ_COUNT_INVALID)
+					{
+						queues[current].dq_count += pktSize;
+						if (queues[current].dq_count >= dq_thresh_)
+						{
+							//take transmission time into account
+							double interval = Scheduler::instance().clock() - queues[current].dq_tstamp + pktSize * 8 / link_capacity_;
+							double rate = queues[current].dq_count * 8 / interval;
+
+							//initialize avg_dq_rate for this queue
+							if (queues[current].avg_dq_rate < 0)
+								queues[current].avg_dq_rate = rate;
+							else
+								queues[current].avg_dq_rate = queues[current].avg_dq_rate * estimate_rate_alpha_ + rate * (1 - estimate_rate_alpha_);
+
+							/* If the queue has receded below the threshold, we hold
+							 * on to the last drain rate calculated, else we reset
+							 * dq_count to 0 to re-enter the if block when the next
+							 * packet is dequeued
+							 */
+							if (queues[current].byteLength() < dq_thresh_)
+								queues[current].dq_count = DQ_COUNT_INVALID;
+							else
+							{
+								queues[current].dq_count = 0;
+								//take transmission time into account
+								queues[current].dq_tstamp = Scheduler::instance().clock() + pktSize * 8 / link_capacity_;
+							}
+
+							if (debug_ && marking_scheme_ == PIE_MARKING)
+								printf("[queue %d] sample departure rate : %.2f average departure rate: %.2f\n", current, rate, queues[current].avg_dq_rate);
+						}
+					}
+
 					/* After dequeue, current queue becomes empty */
 					if (queues[current].length() == 0)
 					{
-						double round_time_sample = Scheduler::instance().clock() - queues[current].start_time + pktSize * 8 / link_capacity_;
+						round_time_sample = Scheduler::instance().clock() - queues[current].start_time + pktSize * 8 / link_capacity_;
 						round_time = round_time * estimate_round_alpha_ + round_time_sample * (1 - estimate_round_alpha_);
 						if (debug_ && marking_scheme_ == MQ_MARKING_RR)
 							printf("sample round time: %.9f round time: %.9f\n", round_time_sample, round_time);
@@ -340,7 +408,7 @@ Packet *WRR::deque(void)
 				/* No enough quantum to dequeue this packet */
 				else
 				{
-					double round_time_sample = Scheduler::instance().clock() - queues[current].start_time;
+					round_time_sample = Scheduler::instance().clock() - queues[current].start_time;
 					round_time = round_time * estimate_round_alpha_ + round_time_sample * (1 - estimate_round_alpha_);
 					if (debug_ && marking_scheme_ == MQ_MARKING_RR)
 						printf("sample round time: %.9f round time: %.9f\n", round_time_sample, round_time);

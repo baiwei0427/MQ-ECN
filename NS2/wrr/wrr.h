@@ -18,6 +18,10 @@
 #define MQ_MARKING_RR 3
 /* Dequeue latency-based ECN marking */
 #define LATENCY_MARKING 4
+/* PIE-like ECN marking */
+#define PIE_MARKING 5
+
+#define DQ_COUNT_INVALID -1
 
 class PacketWRR;
 class WRR;
@@ -25,12 +29,15 @@ class WRR;
 class PacketWRR: public PacketQueue
 {
 	public:
-		PacketWRR(): quantum(1500), counter(0), thresh(0), start_time(0), counter_updated(false) {}
+		PacketWRR(): quantum(1500), counter(0), thresh(0), start_time(0), dq_tstamp(0), dq_count(DQ_COUNT_INVALID), avg_dq_rate(-1), counter_updated(false) {}
 
 		int quantum;	//quantum of this queue
 		int counter;	//counter for bytes that can be sent in this round
 		double thresh;	// per-queue ECN marking threshold (pkts)
 		double start_time;	//time when the queue waits for scheduling in this round
+		double dq_tstamp;	//measurement start time
+		int dq_count;	//measured in bytes
+		double avg_dq_rate;	//average drain rate (bps)
 		bool counter_updated; //whether the counter has been updated in this round
 
 		friend class WRR;
@@ -63,6 +70,8 @@ class WRR : public Queue
 		double estimate_round_alpha_;	//factor between 0 and 1 for round time estimation
 		int estimate_round_idle_interval_bytes_;	//Time interval (divided by link capacity) to update round time when link is idle.
 		double link_capacity_;	//Link capacity
+		int dq_thresh_;	//threshold for departure rate estimation
+		double estimate_rate_alpha_;	//factor between 0 and 1 for departure rate estimation
 		int debug_;	//debug more(true) or not(false)
 
 		Tcl_Channel total_qlen_tchan_;	//place to write total_qlen records
