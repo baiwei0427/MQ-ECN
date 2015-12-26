@@ -6,7 +6,7 @@ set service2_rate_mbps 6000
 set service1_id 1
 set service2_id 0
 set K 80;	#ECN marking threshold
-set marking_scheme 4
+set marking_scheme 5
 
 set RTT 0.0001
 set DCTCP_g_ 0.0625
@@ -38,6 +38,8 @@ Queue/Priority set queue_num_ 2
 Queue/Priority set mean_pktsize_ [expr $packetSize+40]
 Queue/Priority set thresh_ $K
 Queue/Priority set marking_scheme_ $marking_scheme
+Queue/Priority set dq_thresh_ 10000
+Queue/Priority set estimate_rate_alpha_ 0.875
 Queue/Priority set link_capacity_ $lineRate
 Queue/Priority set debug_ true
 

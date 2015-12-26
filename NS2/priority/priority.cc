@@ -29,6 +29,8 @@ Priority::Priority()
     thresh_ = 65;
     mean_pktsize_ = 1500;
     marking_scheme_ = PER_QUEUE_MARKING;
+    dq_thresh_ = 10000;
+    estimate_rate_alpha_ = 0.875;
     link_capacity_ = 10000000000;   //10Gbps
     debug_ = 0;
 
@@ -40,18 +42,35 @@ Priority::Priority()
     bind("thresh_", &thresh_);
     bind("mean_pktsize_", &mean_pktsize_);
     bind("marking_scheme_", &marking_scheme_);
+    bind("dq_thresh_", &dq_thresh_);
+    bind("estimate_rate_alpha_", &estimate_rate_alpha_);
     bind_bw("link_capacity_", &link_capacity_);
     bind_bool("debug_", &debug_);
 
-    //Init queues
+    //Init queues and per-queue variables
     queues = new PacketQueue[MAX_QUEUE_NUM];
-    if (queues == NULL)
+    dq_tstamps = new double[MAX_QUEUE_NUM];
+    dq_counts = new int[MAX_QUEUE_NUM];
+    avg_dq_rates = new double[MAX_QUEUE_NUM];
+
+    if (!queues || !dq_tstamps || !dq_counts || !avg_dq_rates)
         fprintf(stderr, "New Error\n");
+
+    for (int i = 0; i < MAX_QUEUE_NUM; i++)
+    {
+        dq_tstamps[i] = 0;
+        dq_counts[i] = DQ_COUNT_INVALID;
+        avg_dq_rates[i] = -1;
+    }
+
 }
 
 Priority::~Priority()
 {
     delete[] queues;
+    delete[] dq_tstamps;
+    delete[] dq_counts;
+    delete[] avg_dq_rates;
 }
 
 int Priority::TotalByteLength()
@@ -62,6 +81,53 @@ int Priority::TotalByteLength()
         bytelength += queues[i].byteLength();
 
     return bytelength;
+}
+
+/* Determine whether we need to mark ECN where q is current queue number. Return 1 if it requires marking */
+int Priority::MarkingECN(int q)
+{
+	if (q < 0 || q >= queue_num_)
+	{
+		fprintf (stderr,"illegal queue number\n");
+		exit (1);
+	}
+
+	/* Per-queue ECN marking */
+	if (marking_scheme_ == PER_QUEUE_MARKING)
+	{
+		if (queues[q].byteLength() > thresh_ * mean_pktsize_)
+			return 1;
+		else
+			return 0;
+	}
+	/* Per-port ECN marking */
+	else if (marking_scheme_ == PER_PORT_MARKING)
+	{
+		if (TotalByteLength() > thresh_ * mean_pktsize_)
+			return 1;
+		else
+			return 0;
+	}
+	/* PIE-like ECN marking */
+	else if (marking_scheme_ == PIE_MARKING)
+	{
+		double thresh = 0;
+		if (avg_dq_rates[q] > 0 && link_capacity_ > 0)
+			thresh = min(avg_dq_rates[q] / link_capacity_, 1) * thresh_;
+		else
+			thresh = thresh_;
+
+		if (queues[q].byteLength() > thresh * mean_pktsize_)
+			return 1;
+		else
+			return 0;
+	}
+	/* Unknown ECN marking scheme */
+	else
+	{
+		fprintf(stderr,"Unknown ECN marking scheme\n");
+		return 0;
+	}
 }
 
 void Priority::enque(Packet* p)
@@ -88,13 +154,12 @@ void Priority::enque(Packet* p)
 	//Enqueue packet
 	queues[prio].enque(p);
 
-    //Enqueue ECN marking: Per-queue or Per-port
-    if (hf->ect() && ((marking_scheme_ == PER_QUEUE_MARKING && queues[prio].byteLength() > thresh_ * mean_pktsize_) ||
-    (marking_scheme_ == PER_PORT_MARKING && TotalByteLength() > thresh_ * mean_pktsize_)))
-        hf->ce() = 1;
-    //Dequeue latency-based ECN marking
-    else if (hf->ect() && marking_scheme_ == LATENCY_MARKING)
-        hc->timestamp() = Scheduler::instance().clock();
+	/* Enqueue ECN marking */
+    if (marking_scheme_ != LATENCY_MARKING && MarkingECN(prio) > 0 && hf->ect())
+		hf->ce() = 1;
+	/* For dequeue latency ECN marking ,record enqueue timestamp here */
+	else if (marking_scheme_ == LATENCY_MARKING && hf->ect())
+		hc->timestamp() = Scheduler::instance().clock();
 
     trace_qlen();
     trace_total_qlen();
@@ -107,6 +172,7 @@ Packet* Priority::deque()
     hdr_cmn* hc = NULL;
     double sojourn_time = 0;
     double latency_thresh = 0;
+    int pktSize = 0;
 
     if (TotalByteLength() > 0)
 	{
@@ -116,6 +182,8 @@ Packet* Priority::deque()
 		    if (queues[i].length() > 0)
             {
 			    p = queues[i].deque();
+                pktSize = hdr_cmn::access(p)->size();
+
                 if (marking_scheme_ == LATENCY_MARKING)
                 {
                     hc = hdr_cmn::access(p);
@@ -131,6 +199,56 @@ Packet* Priority::deque()
                             printf("sojourn time %.9f > threshold %.9f\n", sojourn_time, latency_thresh);
                     }
                     hc->timestamp() = 0;
+                }
+
+                /* If current queue is about 10KB or more and dq_count is unset
+                 * we have enough packets to calculate the drain rate. Save
+                 * current time as dq_tstamp and start measurement cycle.
+                 */
+                if (queues[i].byteLength() >= dq_thresh_ && dq_counts[i] == DQ_COUNT_INVALID)
+                {
+                    dq_tstamps[i] = Scheduler::instance().clock();
+                    dq_counts[i] = 0;
+                }
+
+                /* Calculate the average drain rate from this value.  If queue length
+                 * has receded to a small value viz., <= dq_thresh_bytes,reset
+                 * the dq_count to -1 as we don't have enough packets to calculate the
+                 * drain rate anymore The following if block is entered only when we
+                 * have a substantial queue built up (dq_thresh_ bytes or more)
+                 * and we calculate the drain rate for the threshold here.*/
+                if (dq_counts[i] != DQ_COUNT_INVALID)
+                {
+                    dq_counts[i] += pktSize;
+                    if (dq_counts[i] >= dq_thresh_)
+                    {
+                        //take transmission time into account
+                        double interval = Scheduler::instance().clock() - dq_tstamps[i] + pktSize * 8 / link_capacity_;
+                        double rate = dq_counts[i] * 8 / interval;
+
+                        //initialize avg_dq_rate for this queue
+                        if (avg_dq_rates[i] < 0)
+                            avg_dq_rates[i] = rate;
+                        else
+                            avg_dq_rates[i] = avg_dq_rates[i] * estimate_rate_alpha_ + rate * (1 - estimate_rate_alpha_);
+
+                        /* If the queue has receded below the threshold, we hold
+                         * on to the last drain rate calculated, else we reset
+                         * dq_count to 0 to re-enter the if block when the next
+                         * packet is dequeued
+                         */
+                        if (queues[i].byteLength() < dq_thresh_)
+                            dq_counts[i] = DQ_COUNT_INVALID;
+                        else
+                        {
+                            dq_counts[i] = 0;
+                            //take transmission time into account
+                            dq_tstamps[i] = Scheduler::instance().clock() + pktSize * 8 / link_capacity_;
+                        }
+
+                        if (debug_ && marking_scheme_ == PIE_MARKING)
+                            printf("[queue %d] sample departure rate : %.2f average departure rate: %.2f\n", i, rate, avg_dq_rates[i]);
+                    }
                 }
 		        return (p);
 		    }
@@ -190,7 +308,7 @@ void Priority::trace_total_qlen()
 		char wrk[500] = {0};
 		int n;
 		double t = Scheduler::instance().clock();
-		sprintf(wrk, "%g, %d", t,TotalByteLength());
+		sprintf(wrk, "%g, %d", t, TotalByteLength());
 		n = strlen(wrk);
 		wrk[n] = '\n';
 		wrk[n+1] = 0;
