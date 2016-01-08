@@ -226,8 +226,10 @@ FullTcpAgent::delay_bind_dispatch(const char *varName, const char *localName, Tc
     if (delay_bind(varName, localName, "pias_thresh_5", &pias_thresh_[5], tracer)) return TCL_OK;
     if (delay_bind(varName, localName, "pias_thresh_6", &pias_thresh_[6], tracer)) return TCL_OK;
     if (delay_bind_bool(varName, localName, "pias_debug_", &pias_debug_, tracer)) return TCL_OK;
+    if (delay_bind(varName, localName, "serviceid_", &serviceid_, tracer)) return TCL_OK;
+    if (delay_bind(varName, localName, "bytes_", &bytes_, tracer)) return TCL_OK;
 
-        return TcpAgent::delay_bind_dispatch(varName, localName, tracer);
+    return TcpAgent::delay_bind_dispatch(varName, localName, tracer);
 }
 
 void
@@ -887,15 +889,15 @@ FullTcpAgent::calPrio(int prio) {
 
 int FullTcpAgent::piasPrio(int bytes_sent)
 {
-    if(enable_pias_&&pias_prio_num_>=1)
+    if (enable_pias_ && pias_prio_num_ >= 1)
     {
-        pias_prio_num_=min(pias_prio_num_,8); //no more than 8 priorities now
-        for(int i=0; i<pias_prio_num_-1; i++) //there are pias_prio_num-1 demotion thresholds in total
+        pias_prio_num_ = min(pias_prio_num_, 8); //no more than 8 priorities now
+        for (int i = 0; i < pias_prio_num_ - 1; i++) //there are pias_prio_num-1 demotion thresholds in total
         {
-            if(bytes_sent<=pias_thresh_[i])
+            if (bytes_sent <= pias_thresh_[i])
                 return i;
         }
-        return pias_prio_num_-1;    //lowest priority by default
+        return pias_prio_num_ - 1;    //lowest priority by default
     }
     else
     {
@@ -1052,18 +1054,26 @@ FullTcpAgent::sendpacket(int seqno, int ackno, int pflags, int datalen, int reas
 	}
 
     /* PIAS packet tagging */
-    if(enable_pias_)
+    if (enable_pias_)
     {
-        if(datalen>0)
+        if (datalen > 0)
         {
-            iph->prio()=piasPrio(seqno-startseq_);
-            if(pias_debug_)
-                printf("Packet prio is %d when bytes sent is %d\n", iph->prio(),seqno-startseq_);
+            iph->prio() = piasPrio(seqno-startseq_);
+            if (pias_debug_)
+                printf("Packet prio is %d when bytes sent is %d\n", iph->prio(), seqno - startseq_);
         }
-        else
+        else    //highest priority by default
         {
-            iph->prio()=0;
+            iph->prio() = 0;
         }
+
+        //We classify different services in the lowest priority
+        if (iph->prio() == pias_prio_num_ - 1)
+            iph->prio() = serviceid_;
+    }
+    else
+    {
+        iph->prio() = serviceid_;
     }
 
 	send(p, 0);
@@ -1742,6 +1752,8 @@ FullTcpAgent::recv(Packet *pkt, Handler*)
 //printf("fid2= %d datalen= %d\n",fid_,datalen);
 	int ackno = tcph->ackno();		 // ack # from packet
 	int tiflags = tcph->flags() ; 		 // tcp flags from packet
+
+	bytes_ += datalen; //Added by Wei Bai
 
 //if (state_ != TCPS_ESTABLISHED || (tiflags&(TH_SYN|TH_FIN))) {
 //fprintf(stdout, "%f(%s)in state %s recv'd this packet: ", now(), name(), statestr(state_));

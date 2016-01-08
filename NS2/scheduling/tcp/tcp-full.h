@@ -87,7 +87,8 @@ public:
         	delack_timer_(this), flags_(0),
         	state_(TCPS_CLOSED), recent_ce_(FALSE),
 		  last_state_(TCPS_CLOSED), rq_(rcv_nxt_), last_ack_sent_(-1),
-		  informpacer(0), enable_pias_(0), pias_prio_num_(0), pias_debug_(0) { }
+		  informpacer(0), enable_pias_(0), pias_prio_num_(0), pias_debug_(0),
+		  bytes_(0),serviceid_(0) { }
 		// Mohammad: added informpacer
 		//Wei: add enable_pias_
 
@@ -104,6 +105,9 @@ public:
 protected:
 	virtual void delay_bind_init_all();
 	virtual int delay_bind_dispatch(const char *varName, const char *localName, TclObject *tracer);
+	int bytes_;	//Wei: bytes received
+	int serviceid_;	//Wei: service id
+
 	/* Shuang: priority dropping */
 	virtual int set_prio(int seq, int maxseq);
 	virtual int calPrio(int prio);
