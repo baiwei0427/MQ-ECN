@@ -75,7 +75,7 @@ class PacketDWRR: public PacketQueue
 		double avg_dq_rate;	//average drain rate (bps)
 		PacketDWRR *next;	//pointer to next node
 
-		friend class DWRR;
+		friend class PRIO_DWRR;
 };
 
 class PRIO_DWRR : public Queue
