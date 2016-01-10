@@ -45,8 +45,9 @@ set topology_x [lindex $argv 22]
 #### FCT log file
 set fct_log [lindex $argv 23]
 
-set pktSize 1460;	#packet size in bytes
-set quantum [expr $pktSize + 40];	#quantum for each per-service queue
+set pktSize 1460;   #packet size in bytes
+set quantum [expr $pktSize + 40];   #quantum for each per-service queue
+set weight 100000;  #weight for each queue (WFQ)
 set link_capacity_unit Gb
 
 puts "Simulation input:"
@@ -135,6 +136,19 @@ Queue/PrioDwrr set estimate_rate_alpha_ 0.875
 Queue/PrioDwrr set link_capacity_ $link_rate$link_capacity_unit
 Queue/PrioDwrr set debug_ false
 
+Queue/PrioWfq set prio_queue_num_ 1
+Queue/PrioWfq set wfq_queue_num_ $service_num
+Queue/PrioWfq set mean_pktsize_ [expr $pktSize + 40]
+Queue/PrioWfq set port_thresh_ $DCTCP_K
+Queue/PrioWfq set marking_scheme_ $ECN_scheme
+Queue/PrioWfq set estimate_weight_alpha_ 0.75
+Queue/PrioWfq set estimate_weight_interval_bytes_ 1500
+Queue/PrioWfq set estimate_weight_enable_timer_ false
+Queue/PrioWfq set dq_thresh_ 10000
+Queue/PrioWfq set estimate_rate_alpha_ 0.875
+Queue/PrioWfq set link_capacity_ $link_rate$link_capacity_unit
+Queue/PrioWfq set debug_ false
+
 ############## Multipathing ###########################
 
 if {$enableMultiPath == 1} {
@@ -168,7 +182,7 @@ for {set i 0} {$i < $S} {incr i} {
     set j [expr $i / $topology_spt]
     $ns duplex-link $s($i) $n($j) [set link_rate]Gb [expr $host_delay + $mean_link_delay]  $switchAlg
 
-##### Configure PrioDwrr for edge links #####
+##### Configure schedulers for edge links #####
 	set L [$ns link $s($i) $n($j)]
 	set q [$L set queue_]
 
@@ -177,7 +191,10 @@ for {set i 0} {$i < $S} {incr i} {
 		if {[string compare $switchAlg "PrioDwrr"] == 0} {
 			$q set-quantum [expr $service_i + 1] $quantum
             $q set-thresh [expr $service_i + 1] $DCTCP_K
-		}
+		} elseif {[string compare $switchAlg "PrioWfq"] == 0} {
+            $q set-weight [expr $service_i + 1] $weight
+            $q set-thresh [expr $service_i + 1] $DCTCP_K
+        }
 	}
 
 	set L [$ns link $n($j) $s($i)]
@@ -188,7 +205,10 @@ for {set i 0} {$i < $S} {incr i} {
 		if {[string compare $switchAlg "PrioDwrr"] == 0} {
 			$q set-quantum [expr $service_i + 1] $quantum
             $q set-thresh [expr $service_i + 1] $DCTCP_K
-		}
+        } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
+            $q set-weight [expr $service_i + 1] $weight
+            $q set-thresh [expr $service_i + 1] $DCTCP_K
+        }
 	}
 }
 
@@ -196,7 +216,7 @@ for {set i 0} {$i < $topology_tors} {incr i} {
     for {set j 0} {$j < $topology_spines} {incr j} {
 		$ns duplex-link $n($i) $a($j) [set UCap]Gb $mean_link_delay $switchAlg
 
-##### Configure PrioDwrr for core links #####
+##### Configure schedulers for core links #####
 		set L [$ns link $n($i) $a($j)]
 		set q [$L set queue_]
 		$q set link_capacity_ $UCap$link_capacity_unit
@@ -206,7 +226,10 @@ for {set i 0} {$i < $topology_tors} {incr i} {
             if {[string compare $switchAlg "PrioDwrr"] == 0} {
     			$q set-quantum [expr $service_i + 1] $quantum
                 $q set-thresh [expr $service_i + 1] $DCTCP_K
-    		}
+            } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
+                $q set-weight [expr $service_i + 1] $weight
+                $q set-thresh [expr $service_i + 1] $DCTCP_K
+            }
 		}
 
 		set L [$ns link $a($j) $n($i)]
@@ -218,7 +241,10 @@ for {set i 0} {$i < $topology_tors} {incr i} {
             if {[string compare $switchAlg "PrioDwrr"] == 0} {
     			$q set-quantum [expr $service_i + 1] $quantum
                 $q set-thresh [expr $service_i + 1] $DCTCP_K
-    		}
+            } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
+                $q set-weight [expr $service_i + 1] $weight
+                $q set-thresh [expr $service_i + 1] $DCTCP_K
+            }
 		}
 	}
 }
