@@ -92,10 +92,6 @@ Agent/TCP set tcpTick_ 0.000001
 Agent/TCP set minrto_ $min_rto
 Agent/TCP set rtxcur_init_ $min_rto;    #RTO init value
 Agent/TCP set maxrto_ 64
-Agent/TCP set lldct_w_min_ 0.125
-Agent/TCP set lldct_w_max_ 2.5
-Agent/TCP set lldct_size_min_ 204800
-Agent/TCP set lldct_size_max_ 1048576
 
 Agent/TCP/FullTcp set nodelay_ true;    #disable Nagle
 Agent/TCP/FullTcp set segsperack_ $ackRatio
@@ -115,7 +111,6 @@ if {[string compare $sourceAlg "DCTCP-Sack"] == 0} {
     Agent/TCP set ecnhat_ true
     Agent/TCPSink set ecnhat_ true
     Agent/TCP set ecnhat_g_ $DCTCP_g
-    Agent/TCP set lldct_ false
 }
 
 ################# Switch Options ######################
@@ -183,70 +178,70 @@ for {set i 0} {$i < $S} {incr i} {
     $ns duplex-link $s($i) $n($j) [set link_rate]Gb [expr $host_delay + $mean_link_delay]  $switchAlg
 
 ##### Configure schedulers for edge links #####
-	set L [$ns link $s($i) $n($j)]
-	set q [$L set queue_]
+    set L [$ns link $s($i) $n($j)]
+    set q [$L set queue_]
 
     $q set-thresh 0 $DCTCP_K
-	for {set service_i 0} {$service_i < $service_num} {incr service_i} {
-		if {[string compare $switchAlg "PrioDwrr"] == 0} {
-			$q set-quantum [expr $service_i + 1] $quantum
-            $q set-thresh [expr $service_i + 1] $DCTCP_K
-		} elseif {[string compare $switchAlg "PrioWfq"] == 0} {
-            $q set-weight [expr $service_i + 1] $weight
-            $q set-thresh [expr $service_i + 1] $DCTCP_K
-        }
-	}
-
-	set L [$ns link $n($j) $s($i)]
-	set q [$L set queue_]
-
-    $q set-thresh 0 $DCTCP_K
-	for {set service_i 0} {$service_i < $service_num} {incr service_i} {
-		if {[string compare $switchAlg "PrioDwrr"] == 0} {
-			$q set-quantum [expr $service_i + 1] $quantum
+    for {set service_i 0} {$service_i < $service_num} {incr service_i} {
+        if {[string compare $switchAlg "PrioDwrr"] == 0} {
+            $q set-quantum [expr $service_i + 1] $quantum
             $q set-thresh [expr $service_i + 1] $DCTCP_K
         } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
             $q set-weight [expr $service_i + 1] $weight
             $q set-thresh [expr $service_i + 1] $DCTCP_K
         }
-	}
+    }
+
+    set L [$ns link $n($j) $s($i)]
+    set q [$L set queue_]
+
+    $q set-thresh 0 $DCTCP_K
+    for {set service_i 0} {$service_i < $service_num} {incr service_i} {
+        if {[string compare $switchAlg "PrioDwrr"] == 0} {
+            $q set-quantum [expr $service_i + 1] $quantum
+            $q set-thresh [expr $service_i + 1] $DCTCP_K
+        } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
+            $q set-weight [expr $service_i + 1] $weight
+            $q set-thresh [expr $service_i + 1] $DCTCP_K
+        }
+    }
 }
 
 for {set i 0} {$i < $topology_tors} {incr i} {
     for {set j 0} {$j < $topology_spines} {incr j} {
-		$ns duplex-link $n($i) $a($j) [set UCap]Gb $mean_link_delay $switchAlg
+        $ns duplex-link $n($i) $a($j) [set UCap]Gb $mean_link_delay $switchAlg
 
 ##### Configure schedulers for core links #####
-		set L [$ns link $n($i) $a($j)]
-		set q [$L set queue_]
-		$q set link_capacity_ $UCap$link_capacity_unit
+        set L [$ns link $n($i) $a($j)]
+        set q [$L set queue_]
+        $q set link_capacity_ $UCap$link_capacity_unit
 
         $q set-thresh 0 $DCTCP_K
-		for {set service_i 0} {$service_i < $service_num} {incr service_i} {
+        for {set service_i 0} {$service_i < $service_num} {incr service_i} {
             if {[string compare $switchAlg "PrioDwrr"] == 0} {
-    			$q set-quantum [expr $service_i + 1] $quantum
+                $q set-quantum [expr $service_i + 1] $quantum
                 $q set-thresh [expr $service_i + 1] $DCTCP_K
             } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
                 $q set-weight [expr $service_i + 1] $weight
                 $q set-thresh [expr $service_i + 1] $DCTCP_K
             }
-		}
+        }
 
-		set L [$ns link $a($j) $n($i)]
-		set q [$L set queue_]
-		$q set link_capacity_ $UCap$link_capacity_unit
+        set L [$ns link $a($j) $n($i)]
+        set q [$L set queue_]
+        $q set link_capacity_ $UCap$link_capacity_unit
 
         $q set-thresh 0 $DCTCP_K
-		for {set service_i 0} {$service_i < $service_num} {incr service_i} {
+        for {set service_i 0} {$service_i < $service_num} {incr service_i} {
             if {[string compare $switchAlg "PrioDwrr"] == 0} {
-    			$q set-quantum [expr $service_i + 1] $quantum
+                $q set-quantum [expr $service_i + 1] $quantum
                 $q set-thresh [expr $service_i + 1] $DCTCP_K
             } elseif {[string compare $switchAlg "PrioWfq"] == 0} {
                 $q set-weight [expr $service_i + 1] $weight
                 $q set-thresh [expr $service_i + 1] $DCTCP_K
             }
-		}
-	}
+        }
+    }
 }
 
 
@@ -266,7 +261,7 @@ set init_fid 0
 
 for {set j 0} {$j < $S } {incr j} {
     for {set i 0} {$i < $S } {incr i} {
-		if {$i != $j} {
+        if {$i != $j} {
             set agtagr($i,$j) [new Agent_Aggr_pair]
 
             #Assign service ID (service ID >= 1)
@@ -297,13 +292,13 @@ for {set j 0} {$j < $S } {incr j} {
             set lambda [expr ($link_rate * $load * 1000000000) / ($meanFlowSize * 8.0)]
             puts -nonewline "($i,$j) service $service_id $dist "
 
-			#For Poisson
-			$agtagr($i,$j) set_PCarrival_process  [expr $lambda/($S - 1)] $flow_cdf [expr 17 * $i + 1244 * $j] [expr 33 * $i + 4369 * $j]
-			$ns at 0.1 "$agtagr($i,$j) warmup 0.5 5"
-			$ns at 1 "$agtagr($i,$j) init_schedule"
+            #For Poisson
+            $agtagr($i,$j) set_PCarrival_process  [expr $lambda/($S - 1)] $flow_cdf [expr 17 * $i + 1244 * $j] [expr 33 * $i + 4369 * $j]
+            $ns at 0.1 "$agtagr($i,$j) warmup 0.5 5"
+            $ns at 1 "$agtagr($i,$j) init_schedule"
 
-			set init_fid [expr $init_fid + $connections_per_pair];
-		}
+            set init_fid [expr $init_fid + $connections_per_pair];
+        }
     }
 }
 
