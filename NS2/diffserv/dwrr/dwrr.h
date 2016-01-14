@@ -96,6 +96,7 @@ class DWRR : public Queue
 		int dq_thresh_;	//threshold for departure rate estimation
 		double estimate_rate_alpha_;	//factor between 0 and 1 for departure rate estimation
 		double link_capacity_;	//Link capacity
+		int deque_marking_;	//shall we enable dequeue ECN/RED marking
 		int debug_;	//debug more(true) or not(false)
 
 		Tcl_Channel total_qlen_tchan_;	//place to write total_qlen records

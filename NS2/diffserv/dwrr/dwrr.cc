@@ -96,6 +96,7 @@ DWRR::DWRR(): timer_(this)
 	dq_thresh_ = 10000;
 	estimate_rate_alpha_ = 0.875;
 	link_capacity_ = 10000000000;	//10Gbps
+	deque_marking_ = 0;	//We use tradition enqueue ECN/RED marking by default
 	debug_ = 0;
 
 	/* bind variables */
@@ -111,6 +112,7 @@ DWRR::DWRR(): timer_(this)
 	bind("dq_thresh_", &dq_thresh_);
 	bind("estimate_rate_alpha_", &estimate_rate_alpha_);
 	bind_bw("link_capacity_", &link_capacity_);
+	bind_bool("deque_marking_", &deque_marking_);
 	bind_bool("debug_", &debug_);
 }
 
@@ -422,15 +424,12 @@ void DWRR::enque(Packet *p)
 	//if(debug_)
 	//	printf("enqueue quantum sum: %d\n", quantum_sum);
 
-	/* Enqueue ECN marking */
-	if (marking_scheme_ != LATENCY_MARKING && MarkingECN(prio) > 0 && hf->ect())
+	/* Enqueue ECN/RED marking */
+	if (marking_scheme_ != LATENCY_MARKING && deque_marking_ == 0 && MarkingECN(prio) > 0 && hf->ect())
 		hf->ce() = 1;
 	/* For dequeue latency ECN marking ,record enqueue timestamp here */
 	else if (marking_scheme_ == LATENCY_MARKING && hf->ect())
 		hc->timestamp() = Scheduler::instance().clock();
-
-	trace_qlen();
-	trace_total_qlen();
 }
 
 Packet *DWRR::deque(void)
@@ -451,7 +450,7 @@ Packet *DWRR::deque(void)
 		while (1)
 		{
 			headNode = activeList->next;	//Get head node from activeList
-			if(headNode == NULL)
+			if (!headNode)
 				fprintf (stderr,"no active flow\n");
 
 			/* if headNode is not empty */
@@ -471,11 +470,14 @@ Packet *DWRR::deque(void)
 					pkt = headNode->deque();
 					headNode->deficitCounter -= pktSize;
 
+					hc = hdr_cmn::access(pkt);
+					hf = hdr_flags::access(pkt);
+					/* dequeue ECN/RED marking */
+					if (marking_scheme_ != LATENCY_MARKING && deque_marking_ == 1 && MarkingECN(headNode->id) > 0 && hf->ect())
+						hf->ce() = 1;
 					/* dequeue latency-based ECN marking */
-					if (marking_scheme_ == LATENCY_MARKING)
+					else if (marking_scheme_ == LATENCY_MARKING)
 					{
-						hc = hdr_cmn::access(pkt);
-						hf = hdr_flags::access(pkt);
 						sojourn_time = Scheduler::instance().clock() - hc->timestamp();
 						if (link_capacity_ > 0)
 							latency_thresh = port_thresh_ * mean_pktsize_ * 8 / link_capacity_;
@@ -588,6 +590,10 @@ Packet *DWRR::deque(void)
 
 	if (TotalByteLength() == 0)
 		last_idle_time = Scheduler::instance().clock();
+
+
+	trace_qlen();
+	trace_total_qlen();
 
 	return pkt;
 }
