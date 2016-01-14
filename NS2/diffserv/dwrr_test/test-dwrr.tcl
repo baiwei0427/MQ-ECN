@@ -7,7 +7,7 @@ set K_0 4; #The per-queue ECN marking threshold of the first queue
 set K_1 16; #The per-queue ECN marking threshold of the second queue
 set W_0 1500; #The quantum (weight) of the first queue
 set W_1 6000; #The quantum (weight) of the second queue
-set marking_schme 5
+set marking_scheme 5
 
 set RTT 0.0001
 set DCTCP_g_ 0.0625
@@ -38,7 +38,7 @@ Queue set limit_ 1000
 Queue/DWRR set queue_num_ 2
 Queue/DWRR set mean_pktsize_ [expr $packetSize+40]
 Queue/DWRR set port_thresh_ $K_port
-Queue/DWRR set marking_scheme_ $marking_schme
+Queue/DWRR set marking_scheme_ $marking_scheme
 Queue/DWRR set estimate_round_alpha_ 0.75
 Queue/DWRR set estimate_quantum_alpha_ 0.75
 Queue/DWRR set estimate_round_idle_interval_bytes_ 1500
@@ -72,6 +72,7 @@ proc finish {} {
 	close $mytracefile
 	close $throughputfile
 	close $qlenfile
+	close $tot_qlenfile
 	exit 0
 }
 
