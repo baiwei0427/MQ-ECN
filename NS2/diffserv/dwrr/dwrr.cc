@@ -536,7 +536,7 @@ Packet *DWRR::deque(void)
 							}
 
 							if (debug_ && marking_scheme_ == PIE_MARKING)
-								printf("[queue %d] sample departure rate : %.2f average departure rate: %.2f\n", headNode->id, rate, headNode->avg_dq_rate);
+								printf("%.9f queue: %d sample departure rate: %.2f average departure rate: %.2f\n", Scheduler::instance().clock(), headNode->id, rate, headNode->avg_dq_rate);
 						}
 					}
 
@@ -547,7 +547,7 @@ Packet *DWRR::deque(void)
 						round_time = round_time * estimate_round_alpha_ + round_time_sample * (1 - estimate_round_alpha_);
 
 						if (debug_ && marking_scheme_ == MQ_MARKING_RR)
-							printf("sample round time: %.9f round time: %.9f\n", round_time_sample, round_time);
+							printf("%.9f queue: %d sample round time: %.9f round time: %.9f\n", Scheduler::instance().clock(), headNode->id, round_time_sample, round_time);
 
 						quantum_sum -= headNode->quantum;
 						headNode = RemoveHeadList(activeList);
@@ -566,7 +566,7 @@ Packet *DWRR::deque(void)
 				  	round_time = round_time * estimate_round_alpha_ + round_time_sample * (1-estimate_round_alpha_);
 
 					if (debug_ && marking_scheme_ == MQ_MARKING_RR)
-						printf("sample round time: %.9f round time: %.9f\n",round_time_sample,round_time);
+						printf("%.9f queue: %d sample round time: %.9f round time: %.9f\n", Scheduler::instance().clock(), headNode->id, round_time_sample, round_time);
 
 					headNode->start_time = Scheduler::instance().clock();	//Reset start time
 					InsertTailList(activeList, headNode);
