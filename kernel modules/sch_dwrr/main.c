@@ -544,6 +544,6 @@ static void __exit dwrr_qdisc_module_exit(void)
 	printk(KERN_INFO "sch_dwrr: stop working\n");
 }
 
-module_init(dwrr_qdisc_module_init)
-module_exit(dwrr_qdisc_module_exit)
+module_init(dwrr_qdisc_module_init);
+module_exit(dwrr_qdisc_module_exit);
 MODULE_LICENSE("GPL");

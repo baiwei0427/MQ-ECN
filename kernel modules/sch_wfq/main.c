@@ -436,6 +436,6 @@ static void __exit wfq_qdisc_module_exit(void)
 	printk(KERN_INFO "sch_wfq: stop working\n");
 }
 
-module_init(wfq_qdisc_module_init)
-module_exit(wfq_qdisc_module_exit)
+module_init(wfq_qdisc_module_init);
+module_exit(wfq_qdisc_module_exit);
 MODULE_LICENSE("GPL");

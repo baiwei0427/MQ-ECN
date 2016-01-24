@@ -759,6 +759,6 @@ static void __exit prio_dwrr_qdisc_module_exit(void)
 	printk(KERN_INFO "sch_prio_dwrr: stop working\n");
 }
 
-module_init(prio_dwrr_qdisc_module_init)
-module_exit(prio_dwrr_qdisc_module_exit)
+module_init(prio_dwrr_qdisc_module_init);
+module_exit(prio_dwrr_qdisc_module_exit);
 MODULE_LICENSE("GPL");
