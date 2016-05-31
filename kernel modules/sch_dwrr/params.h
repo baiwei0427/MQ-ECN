@@ -32,8 +32,8 @@
 #define DWRR_QDISC_MQ_ECN_GENER 3
 /* MQ-ECN for round-robin packet scheduling algorithms */
 #define DWRR_QDISC_MQ_ECN_RR 4
-/* Dequeue latency-based ECN marking. This is a general ECN marking approach for any packet scheduler */
-#define DWRR_QDISC_DEQUE_ECN 5
+/* TCN */
+#define DWRR_QDISC_TCN 5
 
 #define DWRR_QDISC_MAX_ITERATION 10
 
@@ -56,6 +56,7 @@ extern int DWRR_QDISC_ROUND_ALPHA;
 /* Idle time interval */
 extern int DWRR_QDISC_IDLE_INTERVAL_NS;
 
+
 /* Per queue ECN marking threshold (bytes) */
 extern int DWRR_QDISC_QUEUE_THRESH_BYTES[DWRR_QDISC_MAX_QUEUES];
 /* DSCP value for different queues */
@@ -65,16 +66,16 @@ extern int DWRR_QDISC_QUEUE_QUANTUM[DWRR_QDISC_MAX_QUEUES];
 /* Per queue static reserved buffer (bytes) */
 extern int DWRR_QDISC_QUEUE_BUFFER_BYTES[DWRR_QDISC_MAX_QUEUES];
 
-struct DWRR_QDISC_Param
+struct dwrr_qdisc_param
 {
 	char name[64];
 	int *ptr;
 };
 
-extern struct DWRR_QDISC_Param DWRR_QDISC_Params[9+4*DWRR_QDISC_MAX_QUEUES+1];
+extern struct dwrr_qdisc_param DWRR_QDISC_PARAMS[9 + 4 * DWRR_QDISC_MAX_QUEUES + 1];
 
 /* Intialize parameters and register sysctl */
-int dwrr_qdisc_params_init(void);
+bool dwrr_qdisc_params_init(void);
 /* Unregister sysctl */
 void dwrr_qdisc_params_exit(void);
 
