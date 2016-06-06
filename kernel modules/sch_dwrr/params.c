@@ -39,7 +39,7 @@ int DWRR_ROUND_ALPHA_MIN = 0;
 int DWRR_ROUND_ALPHA_MAX = (1 << 10);
 int DWRR_DSCP_MIN = 0;
 int DWRR_DSCP_MAX = 63;
-int DWRR_QUANTUM_MIN = DWRR_MTU_BYTES;
+int DWRR_QUANTUM_MIN = DWRR_MAX_PKT_BYTES;
 int DWRR_QUANTUM_MAX = (200 << 10);
 
 /* Per queue ECN marking threshold (bytes) */
@@ -101,7 +101,7 @@ bool dwrr_params_init()
 		snprintf(DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 2 * DWRR_MAX_QUEUES].name,
 			 63, "queue_quantum_%d", i);
 		DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 2 * DWRR_MAX_QUEUES].ptr = &DWRR_QUEUE_QUANTUM[i];
-		DWRR_QUEUE_QUANTUM[i] = DWRR_MTU_BYTES;
+		DWRR_QUEUE_QUANTUM[i] = DWRR_MAX_PKT_BYTES;
 
 		/* Initialize DWRR_QUEUE_BUFFER_BYTES[DWRR_MAX_QUEUES] */
 		snprintf(DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 3 * DWRR_MAX_QUEUES].name,

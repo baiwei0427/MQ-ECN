@@ -166,7 +166,7 @@ static bool codel_should_mark(const struct sk_buff *skb, struct dwrr_class *cl, 
 	cl->ldelay = ns_to_codel_time(now - skb->tstamp.tv64);
 
 	if (codel_time_before(cl->ldelay, (codel_time_t)DWRR_CODEL_TARGET) ||
-	    cl->len_bytes <= DWRR_MTU_BYTES)
+	    cl->len_bytes <= DWRR_MAX_PKT_BYTES)
 	{
 		/* went below - stay below for at least interval */
 		cl->first_above_time = 0;
@@ -353,7 +353,7 @@ static struct sk_buff* dwrr_dequeue(struct Qdisc *sch)
 		}
 
 		len = skb_size(skb);
-		if (unlikely(len > DWRR_MTU_BYTES))
+		if (unlikely(len > DWRR_MAX_PKT_BYTES))
 			printk(KERN_INFO "Error: packet length %u is larger than MTU\n", len);
 
 		/* If this packet can be scheduled by DWRR */
@@ -363,7 +363,7 @@ static struct sk_buff* dwrr_dequeue(struct Qdisc *sch)
 			s64 toks = min_t(s64,
 					 now - q->time_ns,
 					 (s64)l2t_ns(&q->rate, DWRR_BUCKET_BYTES))
-				   + q->tokens;
+				    + q->tokens;
 
 			s64 pkt_ns = (s64)l2t_ns(&q->rate, len);
 
