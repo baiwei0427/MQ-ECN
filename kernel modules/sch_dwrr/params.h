@@ -3,12 +3,12 @@
 
 #include <linux/types.h>
 
-/* CoDel uses a 1024 nsec clock, encoded in u32
+/*
+ * CoDel uses a 1024 nsec clock, encoded in u32
  * This gives a range of 2199 seconds, because of signed compares
  */
 typedef u32 codel_time_t;
 typedef s32 codel_tdiff_t;
-#define CODEL_SHIFT 10
 
 /* Dealing with timer wrapping, according to RFC 1982, as desc in wikipedia:
  *  https://en.wikipedia.org/wiki/Serial_number_arithmetic#General_Solution
@@ -16,90 +16,101 @@ typedef s32 codel_tdiff_t;
  */
 #define codel_time_after(a, b)						\
 	(typecheck(codel_time_t, a) &&					\
-	typecheck(codel_time_t, b) &&					\
-	((s32)((a) - (b)) > 0))
+	 typecheck(codel_time_t, b) &&					\
+	 ((s32)((a) - (b)) > 0))
 #define codel_time_before(a, b) 	codel_time_after(b, a)
 
 #define codel_time_after_eq(a, b)					\
 	(typecheck(codel_time_t, a) &&					\
-	typecheck(codel_time_t, b) &&					\
-	((s32)((a) - (b)) >= 0))
+	 typecheck(codel_time_t, b) &&					\
+	 ((s32)((a) - (b)) >= 0))
 #define codel_time_before_eq(a, b)	codel_time_after_eq(b, a)
 
+
 /* Our module has at most 8 queues */
-#define DWRR_MAX_QUEUES 8
-/* MTU (1500B) + Ethernet header(14B) + Frame check sequence (4B) + Frame check sequence(8B) + Interpacket gap(12B) */
-#define DWRR_MAX_PKT_BYTES 1538
-/* Ethernet packets with less than the minimum 64 bytes (header (14B) + user data + FCS (4B)) are padded to 64 bytes. */
-#define DWRR_MIN_PKT_BYTES 64
-/* Maximum (per queue/per port shared) buffer size (2MB)*/
-#define DWRR_MAX_BUFFER_BYTES 2000000
-
-/* Debug mode is off */
-#define	DWRR_DEBUG_OFF 0
-/* Debug mode is on */
-#define	DWRR_DEBUG_ON 1
-
+#define dwrr_max_queues 8
+/*
+ * 1538 = MTU (1500B) + Ethernet header(14B) + Frame check sequence (4B) +
+ * Frame check sequence(8B) + Interpacket gap(12B)
+ */
+#define dwrr_max_pkt_bytes 1538
+/*
+ * Ethernet packets with less than the minimum 64 bytes
+ * (header (14B) + user data + FCS (4B)) are padded to 64 bytes.
+ */
+#define dwrr_min_pkt_bytes 64
+/* Maximum (per queue/per port shared) buffer size (2MB) */
+#define dwrr_max_buffer_bytes 2000000
 /* Per port shared buffer management policy */
-#define	DWRR_SHARED_BUFFER 0
+#define	dwrr_shared_buffer 0
 /* Per port static buffer management policy */
-#define	DWRR_STATIC_BUFFER 1
+#define	dwrr_static_buffer 1
 
 /* Disable ECN marking */
-#define	DWRR_DISABLE_ECN 0
+#define	dwrr_disable_ecn 0
 /* Per queue ECN marking */
-#define	DWRR_QUEUE_ECN 1
+#define	dwrr_queue_ecn 1
 /* Per port ECN marking */
-#define DWRR_PORT_ECN 2
-/* MQ-ECN for any packet scheduling algorithm */
-#define DWRR_MQ_ECN_GENER 3
-/* MQ-ECN for round-robin packet scheduling algorithms */
-#define DWRR_MQ_ECN_RR 4
+#define dwrr_port_ecn 2
+/* MQ-ECN */
+#define dwrr_mq_ecn 3
 /* TCN */
-#define DWRR_TCN 5
-/* CoDel ECN marking */
-#define DWRR_CODEL 6
+#define dwrr_tcn 4
+/* CoDel */
+#define dwrr_codel 5
 
-#define DWRR_MAX_ITERATION 10
+#define dwrr_max_iteration 10
+
+/* For MQ-ECN Alpha parameter: dwrr_round_alpha */
+#define dwrr_round_alpha_shift 10
+/* For CoDel timestamp */
+#define dwrr_codel_shift 10
+
+#define dwrr_disable 0
+#define dwrr_enable 1
 
 /* The number of global (rather than 'per-queue') parameters */
-#define DWRR_GLOBAL_PARAMS 12
+#define dwrr_global_params 13
+/* The total number of parameters (per-queue and global parameters) */
+#define dwrr_total_params (dwrr_global_params + 4 * dwrr_max_queues)
 
 /* Global parameters */
-/* Debug mode or not */
-extern int DWRR_DEBUG_MODE;
+/* Enable debug mode or not */
+extern int dwrr_enable_debug;
 /* Buffer management mode: shared (0) or static (1)*/
-extern int DWRR_BUFFER_MODE;
+extern int dwrr_buffer_mode;
 /* Per port shared buffer (bytes) */
-extern int DWRR_SHARED_BUFFER_BYTES;
-/* Bucket size in bytes */
-extern int DWRR_BUCKET_BYTES;
+extern int dwrr_shared_buffer_bytes;
+/* Bucket size in bytes*/
+extern int dwrr_bucket_bytes;
 /* Per port ECN marking threshold (bytes) */
-extern int DWRR_PORT_THRESH_BYTES;
+extern int dwrr_port_thresh_bytes;
 /* ECN marking scheme */
-extern int DWRR_ECN_SCHEME;
-/* Alpha for quantum sum estimation */
-extern int DWRR_QUANTUM_ALPHA;
+extern int dwrr_ecn_scheme;
 /* Alpha for round time estimation */
-extern int DWRR_ROUND_ALPHA;
+extern int dwrr_round_alpha;
 /* Idle time interval */
-extern int DWRR_IDLE_INTERVAL_NS;
+extern int dwrr_idle_interval_ns;
+/* Enable WRR or not */
+extern int dwrr_enable_wrr;
+/* Enable dequeue ECN marking or not */
+extern int dwrr_enable_dequeue_ecn;
 /* TCN threshold (1024 nanoseconds) */
-extern int DWRR_TCN_THRESH;
+extern int dwrr_tcn_thresh;
 /* CoDel target (1024 nanoseconds) */
-extern int DWRR_CODEL_TARGET;
+extern int dwrr_codel_target;
 /* CoDel interval (1024 nanoseconds) */
-extern int DWRR_CODEL_INTERVAL;
+extern int dwrr_codel_interval;
 
-
+/* Per-queue parameters */
 /* Per queue ECN marking threshold (bytes) */
-extern int DWRR_QUEUE_THRESH_BYTES[DWRR_MAX_QUEUES];
+extern int dwrr_queue_thresh_bytes[dwrr_max_queues];
 /* DSCP value for different queues */
-extern int DWRR_QUEUE_DSCP[DWRR_MAX_QUEUES];
+extern int dwrr_queue_dscp[dwrr_max_queues];
 /* Quantum for different queues*/
-extern int DWRR_QUEUE_QUANTUM[DWRR_MAX_QUEUES];
+extern int dwrr_queue_quantum[dwrr_max_queues];
 /* Per queue static reserved buffer (bytes) */
-extern int DWRR_QUEUE_BUFFER_BYTES[DWRR_MAX_QUEUES];
+extern int dwrr_queue_buffer_bytes[dwrr_max_queues];
 
 struct dwrr_param
 {
@@ -107,7 +118,7 @@ struct dwrr_param
 	int *ptr;
 };
 
-extern struct dwrr_param DWRR_PARAMS[DWRR_GLOBAL_PARAMS + 4 * DWRR_MAX_QUEUES + 1];
+extern struct dwrr_param dwrr_params[dwrr_total_params + 1];
 
 /* Intialize parameters and register sysctl */
 bool dwrr_params_init(void);

@@ -11,7 +11,6 @@
 
 #include "params.h"
 
-
 struct dwrr_rate_cfg
 {
 	u64	rate_bps;
@@ -26,38 +25,32 @@ struct dwrr_rate_cfg
  *
  *	For DWRR scheduling
  *	@deficit: deficit counter of this queue (bytes)
- *	@active: whether the queue is not ampty (1) or not (0)
- *  	@curr: whether this queue is currently being served (head of the linked list)
  *	@len_bytes: queue length in bytes
- *  	@start_time_ns: time when this queue is inserted to active list
- *	@last_pkt_time_ns: time when this queue transmits the last packet
- *	@last_pkt_len_ns: length of last packet/rate
+ *  	@start_time: time when this queue is inserted to active list
+ *	@last_pkt_time: time when this queue transmits the last packet
  *	@quantum: quantum in bytes of this queue
  *  	@alist: active linked list
  *
  *	For CoDel
- *	@count: how many marks we've done since the last time we entered marking/dropping state
+ *	@count: how many marks since the last time we entered marking state
  *	@lastcount: count at entry to marking/dropping state
- *	@marking: equal to true if in mark/drop state
+ *	@marking: set to true if in mark/drop state
  *	@rec_inv_sqrt: reciprocal value of sqrt(count) >> 1
- *	@first_above_time: when we went (or will go) continuously above target for interval
- *	@mark_next: time to mark/drop next packet, or when we marked/dropped last
+ *	@first_above_time: when we went (or will go) continuously above target     *      for interval
+ *	@mark_next: time to mark next packet, or when we marked last
  *	@ldelay: sojourn time of last dequeued packet
  */
 struct dwrr_class
 {
 	int		id;
-	struct Qdisc 	*qdisc;
+	struct Qdisc	*qdisc;
 
-	u32		deficit;
-	u8		active;
-	u8		curr;
-	u32		len_bytes;
-	s64		start_time_ns;
-	s64		last_pkt_time_ns;
-	s64		last_pkt_len_ns;
-	u32		quantum;
-	struct		list_head alist;
+	u32	deficit;
+	u32	len_bytes;
+	s64	start_time;
+	s64	last_pkt_time;
+	u32	quantum;
+	struct list_head	alist;
 
 	u32		count;
 	u32		lastcount;
@@ -72,32 +65,34 @@ struct dwrr_class
  *	struct dwrr_sched_data - DWRR scheduler
  *	@queues: multiple Class of Service (CoS) queues
  *	@rate: shaping rate
- *	@active_list: linked list to store active queues
+ *	@active: linked list to store active queues
+ *	@watchdog: watchdog timer for token bucket rate limiter
  *
  *	@tokens: tokens in ns
  *	@sum_len_bytes: the total buffer occupancy (in bytes) of the switch port
  *	@time_ns: time check-point
- *	@watchdog: watchdog timer for token bucket rate limiter
- *	@round_time_ns: estimation of round time in ns
- *	@last_idle_time_ns: last time when the port is idle
- *	@quantum_sum: sum of quantum of all active queues
- *	@quantum_sum_estimate: estimation of quantum_sum
+ *	@round_time: estimation of round time in ns
+ *	@last_idle_time: last time when the port is idle
  */
 struct dwrr_sched_data
 {
 	struct dwrr_class	*queues;
 	struct dwrr_rate_cfg	rate;
-	struct list_head	active_list;
+	struct list_head	active;
+	struct qdisc_watchdog	watchdog;
 
 	s64	tokens;
 	u32	sum_len_bytes;
 	s64	time_ns;
-	struct qdisc_watchdog	watchdog;
-	s64	round_time_ns;
-	s64	last_idle_time_ns;
-	u32	quantum_sum;
-	u32	quantum_sum_estimate;
+	s64	round_time;
+	s64	last_idle_time;
 };
+
+/* nanosecond to codel time (1 << dwrr_codel_shift ns) */
+static inline codel_time_t ns_to_codel_time(s64 ns)
+{
+	return ns >> dwrr_codel_shift;
+}
 
 /* Exponential Weighted Moving Average (EWMA) for s64 */
 static inline s64 s64_ewma(s64 smooth, s64 sample, int weight, int shift)
@@ -107,22 +102,15 @@ static inline s64 s64_ewma(s64 smooth, s64 sample, int weight, int shift)
 	return val >> shift;
 }
 
-/* Exponential Weighted Moving Average (EWMA) for u32 */
-static inline u32 u32_ewma(u32 smooth, u32 sample, int weight, int shift)
-{
-	u32 val = smooth * weight;
-	val += sample * ((1 << shift) - weight);
-	return val >> shift;
-}
 /*
  * We use this function to account for the true number of bytes sent on wire.
- * 20 = frame check sequence(8B) + Interpacket gap(12B)
+ * 20 = frame check sequence(8B)+Interpacket gap(12B)
  * 4 = Frame check sequence (4B)
- * DWRR_MIN_PKT_BYTES = Minimum Ethernet frame size (64B)
+ * dwrr_min_pkt_bytes = Minimum Ethernet frame size (64B)
  */
 static inline unsigned int skb_size(struct sk_buff *skb)
 {
-	return max_t(unsigned int, skb->len + 4, DWRR_MIN_PKT_BYTES) + 20;
+	return max_t(unsigned int, skb->len + 4, dwrr_min_pkt_bytes) + 20;
 }
 
 /* Borrow from ptb */
@@ -134,7 +122,8 @@ static inline void precompute_ratedata(struct dwrr_rate_cfg *r)
 	if (r->rate_bps > 0)
 	{
 		r->shift = 15;
-		r->mult = div64_u64(8LLU * NSEC_PER_SEC * (1 << r->shift), r->rate_bps);
+		r->mult = div64_u64(8LLU * NSEC_PER_SEC * (1 << r->shift),
+				    r->rate_bps);
 	}
 }
 
@@ -144,29 +133,91 @@ static inline u64 l2t_ns(struct dwrr_rate_cfg *r, unsigned int len_bytes)
 	return ((u64)len_bytes * r->mult) >> r->shift;
 }
 
-static inline codel_time_t ns_to_codel_time(s64 ns)
+/* MQ-ECN marking */
+static void mq_ecn_marking(struct sk_buff *skb,
+		      	   struct dwrr_sched_data *q,
+		      	   struct dwrr_class *cl)
 {
-	return ns >> CODEL_SHIFT;
+	u64 ecn_thresh_bytes, estimate_rate_bps;
+
+	if (q->round_time > 0)
+		estimate_rate_bps = div_u64((u64)cl->quantum << 33,
+					    q->round_time);
+	else
+		estimate_rate_bps = q->rate.rate_bps;
+
+	/* rate <= link capacity */
+	estimate_rate_bps = min_t(u64, estimate_rate_bps, q->rate.rate_bps);
+	ecn_thresh_bytes = div_u64(estimate_rate_bps * dwrr_port_thresh_bytes,
+				   q->rate.rate_bps);
+
+	if (cl->len_bytes > ecn_thresh_bytes)
+		INET_ECN_set_ce(skb);
+
+	if (dwrr_enable_debug == dwrr_enable)
+		printk(KERN_INFO "queue %d quantum %u ECN threshold %llu\n",
+	       	       cl->id,
+		       cl->quantum,
+		       ecn_thresh_bytes);
+}
+
+
+/* Queue length based ECN marking: per-queue, per-port and MQ-ECN */
+void dwrr_qlen_marking(struct sk_buff *skb,
+		       struct dwrr_sched_data *q,
+		       struct dwrr_class *cl)
+{
+	switch (dwrr_ecn_scheme)
+	{
+		/* Per-queue ECN marking */
+		case dwrr_queue_ecn:
+		{
+			if (cl->len_bytes > dwrr_queue_thresh_bytes[cl->id])
+				INET_ECN_set_ce(skb);
+			break;
+		}
+		/* Per-port ECN marking */
+		case dwrr_port_ecn:
+		{
+			if (q->sum_len_bytes > dwrr_port_thresh_bytes)
+				INET_ECN_set_ce(skb);
+			break;
+		}
+		/* MQ-ECN */
+		case dwrr_mq_ecn:
+		{
+			mq_ecn_marking(skb, q, cl);
+			break;
+		}
+		default:
+		{
+			break;
+		}
+	}
 }
 
 /* TCN marking scheme */
-static bool tcn_marking(const struct sk_buff *skb)
+static inline void tcn_marking(struct sk_buff *skb)
 {
-	if (codel_time_after(ns_to_codel_time(ktime_get_ns() - skb->tstamp.tv64),
-			     (codel_time_t)DWRR_TCN_THRESH))
-		return true;
-	else
-		return false;
+	codel_time_t delay;
+	delay = ns_to_codel_time(ktime_get_ns() - skb->tstamp.tv64);
+
+	if (codel_time_after(delay, (codel_time_t)dwrr_tcn_thresh))
+		INET_ECN_set_ce(skb);
 }
 
 /* Borrow from codel_should_drop in Linux kernel */
-static bool codel_should_mark(const struct sk_buff *skb, struct dwrr_class *cl, s64 now)
+static bool codel_should_mark(const struct sk_buff *skb,
+	                      struct dwrr_class *cl,
+			      s64 now_ns)
 {
 	bool ok_to_mark;
-	cl->ldelay = ns_to_codel_time(now - skb->tstamp.tv64);
+	codel_time_t now = ns_to_codel_time(now_ns);
 
-	if (codel_time_before(cl->ldelay, (codel_time_t)DWRR_CODEL_TARGET) ||
-	    cl->len_bytes <= DWRR_MAX_PKT_BYTES)
+	cl->ldelay = ns_to_codel_time(now_ns - skb->tstamp.tv64);
+
+	if (codel_time_before(cl->ldelay, (codel_time_t)dwrr_codel_target) ||
+	    cl->len_bytes <= dwrr_max_pkt_bytes)
 	{
 		/* went below - stay below for at least interval */
 		cl->first_above_time = 0;
@@ -179,9 +230,9 @@ static bool codel_should_mark(const struct sk_buff *skb, struct dwrr_class *cl, 
 		/* just went above from below. If we stay above
          	 * for at least interval we'll say it's ok to mark
          	 */
-		cl->first_above_time = ns_to_codel_time(now) + DWRR_CODEL_INTERVAL;
+		cl->first_above_time = now + dwrr_codel_interval;
 	}
-	else if (codel_time_after(ns_to_codel_time(now), cl->first_above_time))
+	else if (codel_time_after(now, cl->first_above_time))
 	{
 		ok_to_mark = true;
 	}
@@ -189,18 +240,13 @@ static bool codel_should_mark(const struct sk_buff *skb, struct dwrr_class *cl, 
 	return ok_to_mark;
 }
 
-#define REC_INV_SQRT_BITS (8 * sizeof(u16)) /* or sizeof_in_bits(rec_inv_sqrt) */
+
+/* or sizeof_in_bits(rec_inv_sqrt) */
+#define REC_INV_SQRT_BITS (8 * sizeof(u16))
 /* needed shift to get a Q0.32 number from rec_inv_sqrt */
 #define REC_INV_SQRT_SHIFT (32 - REC_INV_SQRT_BITS)
 
-/*
- * http://en.wikipedia.org/wiki/Methods_of_computing_square_roots#Iterative_methods_for_reciprocal_square_roots
- * new_invsqrt = (invsqrt / 2) * (3 - count * invsqrt^2)
- *
- * Here, invsqrt is a fixed point number (< 1.0), 32bit mantissa, aka Q0.32
- *
- * Borrow from codel_Newton_step in Linux kernel
- */
+/* Borrow from codel_Newton_step in Linux kernel */
 static void codel_Newton_step(struct dwrr_class *cl)
 {
 	u32 invsqrt = ((u32)cl->rec_inv_sqrt) << REC_INV_SQRT_SHIFT;
@@ -224,14 +270,16 @@ static codel_time_t codel_control_law(codel_time_t t,
 				      codel_time_t interval,
 				      u32 rec_inv_sqrt)
 {
-	return t + reciprocal_scale(interval, rec_inv_sqrt << REC_INV_SQRT_SHIFT);
+	return t + reciprocal_scale(interval,
+				    rec_inv_sqrt << REC_INV_SQRT_SHIFT);
 }
 
-/* Implement CoDel ECN marking algorithm. Borrow from codel_dequeue in Linux kernel */
-static bool codel_marking(const struct sk_buff *skb, struct dwrr_class *cl)
+/* CoDel ECN marking. Borrow from codel_dequeue in Linux kernel */
+static void codel_marking(struct sk_buff *skb, struct dwrr_class *cl)
 {
-	s64 now = ktime_get_ns();
-	bool mark = codel_should_mark(skb, cl, now);
+	s64 now_ns = ktime_get_ns();
+	codel_time_t now = ns_to_codel_time(now_ns);
+	bool mark = codel_should_mark(skb, cl, now_ns);
 
 	if (cl->marking)
 	{
@@ -239,61 +287,57 @@ static bool codel_marking(const struct sk_buff *skb, struct dwrr_class *cl)
 		{
 			/* sojourn time below target - leave marking state */
 			cl->marking = false;
-			return false;
 		}
-		else if (codel_time_after_eq(ns_to_codel_time(now), cl->mark_next))
+		else if (codel_time_after_eq(now, cl->mark_next))
 		{
 			/* It's time for the next mark */
 			cl->count++;
 			codel_Newton_step(cl);
 			cl->mark_next = codel_control_law(cl->mark_next,
-							  DWRR_CODEL_INTERVAL,
-							  cl->rec_inv_sqrt);
-			return true;
-    		}
+					  	          dwrr_codel_interval,
+					                  cl->rec_inv_sqrt);
+			INET_ECN_set_ce(skb);
+		}
 	}
 	else if (mark)
 	{
 		u32 delta;
+
+		INET_ECN_set_ce(skb);
 		cl->marking = true;
-        	/* if min went above target close to when we last went below it
+		/* if min went above target close to when we last went below it
          	 * assume that the drop rate that controlled the queue on the
          	 * last cycle is a good starting point to control it now.
          	 */
 		delta = cl->count - cl->lastcount;
-		if (delta > 1 &&
-		    codel_time_before(ns_to_codel_time(now) - cl->mark_next,
-				      (codel_time_t)DWRR_CODEL_INTERVAL << 4))
-		{
-        		cl->count = delta;
-            		/* we dont care if rec_inv_sqrt approximation
-             		 * is not very precise :
-             		 * Next Newton steps will correct it quadratically.
-             		 */
-        		codel_Newton_step(cl);
-		}
-		else
-		{
-			cl->count = 1;
-			cl->rec_inv_sqrt = ~0U >> REC_INV_SQRT_SHIFT;
-		}
-		cl->lastcount = cl->count;
-		cl->mark_next = codel_control_law(ns_to_codel_time(now),
-						  DWRR_CODEL_INTERVAL,
-						  cl->rec_inv_sqrt);
-		return true;
+ 		if (delta > 1 &&
+ 		    codel_time_before(now - cl->mark_next,
+ 				      (codel_time_t)dwrr_codel_interval * 16))
+ 		{
+         		cl->count = delta;
+             		/* we dont care if rec_inv_sqrt approximation
+              		 * is not very precise :
+              		 * Next Newton steps will correct it quadratically.
+              		 */
+         		codel_Newton_step(cl);
+ 		}
+ 		else
+ 		{
+ 			cl->count = 1;
+ 			cl->rec_inv_sqrt = ~0U >> REC_INV_SQRT_SHIFT;
+ 		}
+ 		cl->lastcount = cl->count;
+ 		cl->mark_next = codel_control_law(now,
+ 						  dwrr_codel_interval,
+ 						  cl->rec_inv_sqrt);
 	}
-
-	return false;
 }
-
 
 static struct dwrr_class *dwrr_classify(struct sk_buff *skb, struct Qdisc *sch)
 {
-	int i = 0;
 	struct dwrr_sched_data *q = qdisc_priv(sch);
 	struct iphdr* iph = ip_hdr(skb);
-	int dscp;
+	int i, dscp;
 
 	if (unlikely(!(q->queues)))
 		return NULL;
@@ -302,11 +346,11 @@ static struct dwrr_class *dwrr_classify(struct sk_buff *skb, struct Qdisc *sch)
 	if (unlikely(!iph))
 		return &(q->queues[0]);
 
-	dscp = (const int)(iph->tos >> 2);
+	dscp = iph->tos >> 2;
 
-	for (i = 0; i < DWRR_MAX_QUEUES; i++)
+	for (i = 0; i < dwrr_max_queues; i++)
 	{
-		if (dscp == DWRR_QUEUE_DSCP[i])
+		if (dscp == dwrr_queue_dscp[i])
 			return &(q->queues[i]);
 	}
 
@@ -314,175 +358,219 @@ static struct dwrr_class *dwrr_classify(struct sk_buff *skb, struct Qdisc *sch)
 }
 
 /* We don't need this */
-static struct sk_buff* dwrr_peek(struct Qdisc *sch)
+static struct sk_buff *dwrr_peek(struct Qdisc *sch)
 {
 	return NULL;
 }
 
-static struct sk_buff* dwrr_dequeue(struct Qdisc *sch)
+/* Choose the packet to schedule according to DWRR algorithm */
+/*static struct sk_buff *dwrr_schedule(struct dwrr_sched_data *q,
+				     struct dwrr_class *cl)
+{
+	struct sk_buff *skb = NULL;
+	s64 sample;
+
+	while (true)
+	{
+		cl = list_first_entry(&q->active,
+				      struct dwrr_class,
+				      alist);
+
+
+		if (cl->qdisc->q.qlen == 0)
+		{
+			sample = cl->last_pkt_time - cl->start_time;
+			q->round_time = s64_ewma(q->round_time,
+						    sample,
+						    dwrr_round_alpha,
+						    dwrr_round_alpha_shift);
+			list_del(&cl->alist);
+			continue;
+		}
+
+		skb = cl->qdisc->ops->peek(cl->qdisc);
+		if (unlikely(!skb))
+			goto out;
+
+		if (skb_size(skb) <= cl->deficit)
+		{
+			return skb;
+		}
+		else
+		{
+			sample = cl->last_pkt_time - cl->start_time;
+			q->round_time = s64_ewma(q->round_time,
+						    sample,
+						    dwrr_round_alpha,
+						    dwrr_round_alpha_shift);
+
+			cl->start_time = cl->last_pkt_time;
+			cl->quantum = dwrr_queue_quantum[cl->id];
+
+			if (dwrr_enable_wrr == dwrr_enable)
+				cl->deficit = cl->quantum;
+			else
+				cl->deficit += cl->quantum;
+
+			list_move_tail(&cl->alist, &q->active);
+		}
+	}
+
+out:
+	return NULL;
+}
+*/
+
+/* Decide whether the packet can be transmitted according to Token Bucket */
+static s64 tbf_schedule(unsigned int len, struct dwrr_sched_data *q, s64 now)
+{
+	s64 pkt_ns, toks;
+
+	toks = now - q->time_ns;
+	toks = min_t(s64, toks, (s64)l2t_ns(&q->rate, dwrr_bucket_bytes));
+	toks += q->tokens;
+
+	pkt_ns = (s64)l2t_ns(&q->rate, len);
+
+	return toks - pkt_ns;
+}
+
+static inline void print_round_time(s64 sample, s64 smooth)
+{
+	/* Print necessary information in debug mode */
+	if (dwrr_enable_debug == dwrr_enable && dwrr_ecn_scheme == dwrr_mq_ecn)
+	{
+		printk(KERN_INFO "sample round time %llu\n", sample);
+		printk(KERN_INFO "smooth round time %llu\n", smooth);
+	}
+}
+
+static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
 {
 	struct dwrr_sched_data *q = qdisc_priv(sch);
 	struct dwrr_class *cl = NULL;
 	struct sk_buff *skb = NULL;
-	s64 sample_ns = 0;
+	s64 sample, result;
+	s64 now = ktime_get_ns();
+	s64 bucket_ns = (s64)l2t_ns(&q->rate, dwrr_bucket_bytes);
 	unsigned int len;
 
 	/* No active queue */
-	if (list_empty(&q->active_list))
+	if (list_empty(&q->active))
 		return NULL;
 
 	while (1)
 	{
-		cl = list_first_entry(&q->active_list, struct dwrr_class, alist);
+		cl = list_first_entry(&q->active, struct dwrr_class, alist);
 		if (unlikely(!cl))
 			return NULL;
-
-		/* update deficit counter for this round*/
-		if (cl->curr == 0)
-		{
-			cl->curr = 1;
-			cl->deficit += cl->quantum;
-		}
 
 		/* get head packet */
 		skb = cl->qdisc->ops->peek(cl->qdisc);
 		if (unlikely(!skb))
-		{
-			qdisc_warn_nonwc(__func__, cl->qdisc);
 			return NULL;
-		}
 
 		len = skb_size(skb);
-		if (unlikely(len > DWRR_MAX_PKT_BYTES))
-			printk(KERN_INFO "Error: packet length %u is larger than MTU\n", len);
+		if (unlikely(len > dwrr_max_pkt_bytes))
+			printk(KERN_INFO "Error: pkt length %u > MTU\n", len);
 
 		/* If this packet can be scheduled by DWRR */
 		if (len <= cl->deficit)
 		{
-			s64 now = ktime_get_ns();
-			s64 toks = min_t(s64,
-					 now - q->time_ns,
-					 (s64)l2t_ns(&q->rate, DWRR_BUCKET_BYTES))
-				    + q->tokens;
-
-			s64 pkt_ns = (s64)l2t_ns(&q->rate, len);
-
-			/* If we have enough tokens to release this packet */
-			if (toks > pkt_ns)
+			result = tbf_schedule(len, q, now);
+			/* If we don't have enough tokens */
+			if (result < 0)
 			{
-				skb = qdisc_dequeue_peeked(cl->qdisc);
-				if (unlikely(!skb))
-					return NULL;
-
-				/* Print necessary information in debug mode */
-				if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON)
-				{
-					printk(KERN_INFO "total buffer occupancy %u\n", q->sum_len_bytes);
-					printk(KERN_INFO "queue %d buffer occupancy %u\n", cl->id, cl->len_bytes);
-				}
-
-				q->sum_len_bytes -= len;
-				sch->q.qlen--;
-				cl->len_bytes -= len;
-				cl->deficit -= len;
-				cl->last_pkt_len_ns = pkt_ns;
-				cl->last_pkt_time_ns = ktime_get_ns();
-
-				if (cl->qdisc->q.qlen == 0)
-				{
-					cl->active = 0;
-					cl->curr = 0;
-					list_del(&cl->alist);
-					q->quantum_sum -= cl->quantum;
-					sample_ns = max_t(s64,
-							  cl->last_pkt_time_ns - cl->start_time_ns,
-							  cl->last_pkt_len_ns);
-					q->round_time_ns = s64_ewma(q->round_time_ns, sample_ns,
-								    DWRR_ROUND_ALPHA, 10);
-
-					/* Get start time of idle period */
-					if (q->sum_len_bytes == 0)
-						q->last_idle_time_ns = ktime_get_ns();
-
-					/* Print necessary information in debug mode with MQ-ECN-RR*/
-					if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON &&
-					    DWRR_ECN_SCHEME == DWRR_MQ_ECN_RR)
-					{
-						printk(KERN_INFO "sample round time %llu \n",sample_ns);
-						printk(KERN_INFO "round time %llu\n",q->round_time_ns);
-					}
-				}
-
-				/* Update quantum_sum_estimate */
-				q->quantum_sum_estimate = u32_ewma(q->quantum_sum_estimate, q->quantum_sum,
-							  	   DWRR_QUANTUM_ALPHA, 10);
-				/* Print necessary information in debug mode with MQ-ECN-GENER*/
-				if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON &&
-				    DWRR_ECN_SCHEME == DWRR_MQ_ECN_GENER)
-				{
-					printk(KERN_INFO "sample quantum sum %u\n", q->quantum_sum);
-					printk(KERN_INFO "quantum sum %u\n", q->quantum_sum_estimate);
-				}
-
-				/* Latency-based ECN marking */
-				if (skb->tstamp.tv64 > 0)
-				{
-					/* TCN */
-					if (DWRR_ECN_SCHEME == DWRR_TCN &&
-					    tcn_marking(skb))
-					{
-                    				INET_ECN_set_ce(skb);
-					}
-					/* CoDel */
-					else if (DWRR_ECN_SCHEME == DWRR_CODEL &&
-					         codel_marking(skb, cl))
-					{
-						INET_ECN_set_ce(skb);
-					}
-				}
-
-				//printk(KERN_INFO "Dequeue from queue %d\n",cl->id);
-				/* Bucket */
-				q->time_ns = now;
-				q->tokens = min_t(s64, toks - pkt_ns,
-						  (s64)l2t_ns(&q->rate, DWRR_BUCKET_BYTES));
-
-				qdisc_unthrottled(sch);
-				qdisc_bstats_update(sch, skb);
-				return skb;
-			}
-			/* if we don't have enough tokens to realse this packet */
-			else
-			{
-				/* we use now+t due to absolute mode of hrtimer (HRTIMER_MODE_ABS) */
-				qdisc_watchdog_schedule_ns(&q->watchdog, now + pkt_ns - toks, true);
+				/* For hrtimer absolute mode, we use now + t */
+				qdisc_watchdog_schedule_ns(&q->watchdog,
+							   now - result,
+							   true);
 				qdisc_qstats_overlimit(sch);
 				return NULL;
 			}
+
+			skb = qdisc_dequeue_peeked(cl->qdisc);
+			if (unlikely(!skb))
+				return NULL;
+
+			q->sum_len_bytes -= len;
+			sch->q.qlen--;
+			cl->len_bytes -= len;
+			cl->deficit -= len;
+			cl->last_pkt_time = now + l2t_ns(&q->rate, len);
+
+			if (cl->qdisc->q.qlen == 0)
+			{
+				list_del(&cl->alist);
+				sample = cl->last_pkt_time - cl->start_time,
+				q->round_time = s64_ewma(q->round_time,
+							sample, dwrr_round_alpha, dwrr_round_alpha_shift);
+
+				/* Get start time of idle period */
+				if (q->sum_len_bytes == 0)
+					q->last_idle_time = now;
+
+				print_round_time(sample, q->round_time);
+			}
+
+			/* Bucket */
+			q->time_ns = now;
+			q->tokens = min_t(s64, result, bucket_ns);
+			qdisc_unthrottled(sch);
+			qdisc_bstats_update(sch, skb);
+
+
+			/* TCN */
+			if (dwrr_ecn_scheme == dwrr_tcn)
+				tcn_marking(skb);
+			/* CoDel */
+			else if (dwrr_ecn_scheme == dwrr_codel)
+				codel_marking(skb, cl);
+			/* dequeu equeue length based ECN marking */
+			else if (dwrr_enable_dequeue_ecn == dwrr_enable)
+				dwrr_qlen_marking(skb, q, cl);
+
+			return skb;
 		}
 		/* This packet can not be scheduled by DWRR */
 		else
 		{
-			cl->curr = 0;
-			sample_ns = max_t(s64, cl->last_pkt_time_ns - cl->start_time_ns, cl->last_pkt_len_ns);
-			q->round_time_ns = s64_ewma(q->round_time_ns, sample_ns, DWRR_ROUND_ALPHA, 10);
-			cl->start_time_ns = ktime_get_ns();
-			q->quantum_sum -= cl->quantum;
-			cl->quantum = DWRR_QUEUE_QUANTUM[cl->id];
-			q->quantum_sum += cl->quantum;
-			list_move_tail(&cl->alist, &q->active_list);
+			sample = cl->last_pkt_time - cl->start_time;
+			q->round_time = s64_ewma(q->round_time,
+						 sample,
+						 dwrr_round_alpha, dwrr_round_alpha_shift);
+			cl->start_time = cl->last_pkt_time;
+			cl->quantum = dwrr_queue_quantum[cl->id];
+			list_move_tail(&cl->alist, &q->active);
 
-			/* Print necessary information in debug mode with MQ-ECN-RR */
-			if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON &&
-			    DWRR_ECN_SCHEME == DWRR_MQ_ECN_RR)
-			{
-				printk(KERN_INFO "sample round time %llu\n",sample_ns);
-				printk(KERN_INFO "round time %llu\n",q->round_time_ns);
-			}
+			/* WRR */
+			if (dwrr_enable_wrr == dwrr_enable)
+				cl->deficit = cl->quantum;
+			/* DWRR */
+			else
+				cl->deficit += cl->quantum;
+
+			print_round_time(sample, q->round_time);
 		}
 	}
 
 	return NULL;
+}
+
+static bool dwrr_buffer_overfill(unsigned int len,
+				 struct dwrr_class *cl,
+				 struct dwrr_sched_data *q)
+{
+	/* per-port shared buffer */
+	if (dwrr_buffer_mode == dwrr_shared_buffer &&
+	    q->sum_len_bytes + len > dwrr_shared_buffer_bytes)
+		return true;
+	/* per-queue static buffer */
+	else if (dwrr_buffer_mode == dwrr_static_buffer &&
+		 cl->len_bytes + len > dwrr_queue_buffer_bytes[cl->id])
+		return true;
+	else
+		return false;
 }
 
 static int dwrr_enqueue(struct sk_buff *skb, struct Qdisc *sch)
@@ -490,161 +578,72 @@ static int dwrr_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	struct dwrr_class *cl = NULL;
 	unsigned int len = skb_size(skb);
 	struct dwrr_sched_data *q = qdisc_priv(sch);
-	int ret;
-	u64 estimate_rate_bps = 0;
-	u64 ecn_thresh_bytes = 0;
-	s64 interval = ktime_get_ns() - q->last_idle_time_ns;
-	s64 interval_num = 0;
-	int i = 0;
+	s64 interval, interval_num = 0;
+	int i, ret;
 
 	if (q->sum_len_bytes == 0 &&
-	    (DWRR_ECN_SCHEME == DWRR_MQ_ECN_RR || DWRR_ECN_SCHEME == DWRR_MQ_ECN_GENER))
+	    dwrr_ecn_scheme == dwrr_mq_ecn &&
+     	    dwrr_idle_interval_ns > 0)
 	{
-		if (DWRR_IDLE_INTERVAL_NS > 0)
-		{
-			interval_num = div_s64(interval, DWRR_IDLE_INTERVAL_NS);
-			if (interval_num <= DWRR_MAX_ITERATION)
-			{
-				for (i = 0; i < interval_num; i++)
-				{
-					q->round_time_ns = s64_ewma(q->round_time_ns, 0,
-						 		    DWRR_ROUND_ALPHA, 10);
-					q->quantum_sum_estimate = u32_ewma(q->quantum_sum_estimate, 0,
-									   DWRR_QUANTUM_ALPHA, 10);
-				}
-			}
-			else
-			{
-				q->round_time_ns = 0;
-				q->quantum_sum_estimate = 0;
-			}
-		}
-		else
-		{
-			q->round_time_ns = 0;
-			q->quantum_sum_estimate = 0;
-		}
-		if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON)
-		{
-			if (DWRR_ECN_SCHEME == DWRR_MQ_ECN_RR)
-				printk(KERN_INFO "round time is set to %llu\n", q->round_time_ns);
-			else
-				printk(KERN_INFO "quantum sum is reset to %u\n", q->quantum_sum_estimate);
-		}
+		interval = ktime_get_ns() - q->last_idle_time;
+		interval_num = div_s64(interval, dwrr_idle_interval_ns);
+	}
+
+	if (interval_num > 0 && interval_num <= dwrr_max_iteration)
+	{
+		for (i = 0; i < interval_num; i++)
+			q->round_time = s64_ewma(q->round_time,
+						 0,
+						 dwrr_round_alpha, dwrr_round_alpha_shift);
+	}
+	else if (interval_num > dwrr_max_iteration)
+	{
+		q->round_time = 0;
 	}
 
 	cl = dwrr_classify(skb,sch);
-	/* No appropriate queue or per port shared buffer is overfilled or per queue static buffer is overfilled */
-	if (!cl ||
-	    (DWRR_BUFFER_MODE == DWRR_SHARED_BUFFER &&
-	     q->sum_len_bytes + len > DWRR_SHARED_BUFFER_BYTES) ||
-	    (DWRR_BUFFER_MODE == DWRR_STATIC_BUFFER &&
-	     cl->len_bytes + len > DWRR_QUEUE_BUFFER_BYTES[cl->id]))
+	/* No appropriate queue or the switch buffer is overfilled */
+	if (unlikely(!cl) || dwrr_buffer_overfill(len, cl, q))
 	{
 		qdisc_qstats_drop(sch);
 		qdisc_qstats_drop(cl->qdisc);
 		kfree_skb(skb);
 		return NET_XMIT_DROP;
 	}
-	else
+
+	ret = qdisc_enqueue(skb, cl->qdisc);
+	if (unlikely(ret != NET_XMIT_SUCCESS))
 	{
-		ret = qdisc_enqueue(skb, cl->qdisc);
-		if (ret == NET_XMIT_SUCCESS)
+		if (likely(net_xmit_drop_count(ret)))
 		{
-			if (cl->len_bytes == 0 &&
-			    DWRR_ECN_SCHEME == DWRR_CODEL)
-			{
-                		/* CoDel leaves marking state when the queue is empty */
-                		cl->marking = false;
-			}
-
-			/* Update queue sizes */
-			sch->q.qlen++;
-			q->sum_len_bytes += len;
-			cl->len_bytes += len;
-
-			if (cl->active == 0)
-			{
-				cl->deficit = 0;
-				cl->active = 1;
-				cl->curr = 0;
-				cl->start_time_ns = ktime_get_ns();
-				cl->quantum = DWRR_QUEUE_QUANTUM[cl->id];
-				list_add_tail(&(cl->alist), &(q->active_list));
-				q->quantum_sum += cl->quantum;
-			}
-
-			/* Per-queue ECN marking */
-			if (DWRR_ECN_SCHEME == DWRR_QUEUE_ECN &&
-			    cl->len_bytes > DWRR_QUEUE_THRESH_BYTES[cl->id])
-			{
-				//printk(KERN_INFO "ECN marking\n");
-				INET_ECN_set_ce(skb);
-			}
-			/* Per-port ECN marking */
-			else if (DWRR_ECN_SCHEME == DWRR_PORT_ECN &&
-			         q->sum_len_bytes > DWRR_PORT_THRESH_BYTES)
-			{
-				INET_ECN_set_ce(skb);
-			}
-			/* MQ-ECN for any packet scheduling algorithm */
-			else if (DWRR_ECN_SCHEME == DWRR_MQ_ECN_GENER)
-			{
-				if (q->quantum_sum_estimate > 0)
-					ecn_thresh_bytes = min_t(u64, DWRR_PORT_THRESH_BYTES,
-								 div_u64((u64)cl->quantum * DWRR_PORT_THRESH_BYTES,
-								 	 q->quantum_sum_estimate));
-
-				else
-                    			ecn_thresh_bytes = DWRR_PORT_THRESH_BYTES;
-
-				if (cl->len_bytes > ecn_thresh_bytes)
-					INET_ECN_set_ce(skb);
-
-				if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON)
-					printk(KERN_INFO "queue %d quantum %u ECN threshold %llu\n",
-					       cl->id, cl->quantum, ecn_thresh_bytes);
-			}
-			/* MQ-ECN for round robin algorithms */
-			else if (DWRR_ECN_SCHEME == DWRR_MQ_ECN_RR)
-			{
-				if (q->round_time_ns > 0)
-				{
-                    			estimate_rate_bps = min_t(u64, q->rate.rate_bps,
-								  div_u64((u64)cl->quantum << 33,
-								  	  q->round_time_ns));
-                    			ecn_thresh_bytes =  div_u64(estimate_rate_bps * DWRR_PORT_THRESH_BYTES,
-								    q->rate.rate_bps);
-                		}
-				else
-				{
-                    			ecn_thresh_bytes = DWRR_PORT_THRESH_BYTES;
-                		}
-
-				if (cl->len_bytes > ecn_thresh_bytes)
-					INET_ECN_set_ce(skb);
-
-				if (DWRR_DEBUG_MODE == DWRR_DEBUG_ON)
-					printk(KERN_INFO "queue %d quantum %u ECN threshold %llu\n",
-					       cl->id, cl->quantum, ecn_thresh_bytes);
-			}
-			else if (DWRR_ECN_SCHEME == DWRR_TCN ||
-				 DWRR_ECN_SCHEME == DWRR_CODEL)
-			{
-                		/* Get enqueue time stamp */
-                		skb->tstamp = ktime_get();
-            		}
-		}
-		else
-		{
-			if (net_xmit_drop_count(ret))
-			{
-				qdisc_qstats_drop(sch);
-				qdisc_qstats_drop(cl->qdisc);
-			}
+			qdisc_qstats_drop(sch);
+			qdisc_qstats_drop(cl->qdisc);
 		}
 		return ret;
 	}
+
+	/* Update queue sizes */
+	sch->q.qlen++;
+	q->sum_len_bytes += len;
+	cl->len_bytes += len;
+
+	/* If the queue is empty, insert it to the linked list */
+	if (cl->qdisc->q.qlen == 1)
+	{
+		cl->start_time = ktime_get_ns();
+		cl->quantum = dwrr_queue_quantum[cl->id];
+		cl->deficit = cl->quantum;
+		list_add_tail(&(cl->alist), &(q->active));
+	}
+
+	/* sojourn time based ECN marking: TCN and CoDel */
+	if (dwrr_ecn_scheme == dwrr_tcn || dwrr_ecn_scheme == dwrr_codel)
+		skb->tstamp = ktime_get();
+	/* enqueue queue length based ECN marking */
+	else if (dwrr_enable_dequeue_ecn == dwrr_disable)
+		dwrr_qlen_marking(skb, q, cl);
+
+	return ret;
 }
 
 /* We don't need this */
@@ -665,13 +664,12 @@ static void dwrr_destroy(struct Qdisc *sch)
 	struct dwrr_sched_data *q = qdisc_priv(sch);
 	int i;
 
-	if (q->queues)
+	if (likely(q->queues))
 	{
-		for (i = 0; i < DWRR_MAX_QUEUES && (q->queues[i]).qdisc; i++)
+		for (i = 0; i < dwrr_max_queues && (q->queues[i]).qdisc; i++)
 			qdisc_destroy((q->queues[i]).qdisc);
 
 		kfree(q->queues);
-		q->queues=NULL;
 	}
 	qdisc_watchdog_cancel(&q->watchdog);
 }
@@ -692,11 +690,11 @@ static int dwrr_change(struct Qdisc *sch, struct nlattr *opt)
 	__u32 rate;
 
 	err = nla_parse_nested(tb, TCA_TBF_PTAB, opt, dwrr_policy);
-	if (err < 0)
+	if(err < 0)
 		return err;
 
 	err = -EINVAL;
-	if (!(tb[TCA_TBF_PARMS]))
+	if (!tb[TCA_TBF_PARMS])
 		goto done;
 
 	qopt = nla_data(tb[TCA_TBF_PARMS]);
@@ -705,7 +703,7 @@ static int dwrr_change(struct Qdisc *sch, struct nlattr *opt)
 	q->rate.rate_bps = (u64)rate << 3;
 	precompute_ratedata(&q->rate);
 	err = 0;
-	printk(KERN_INFO "sch_dwrr: rate %llu Mbps\n", q->rate.rate_bps / 1000000);
+	printk(KERN_INFO "sch_dwrr: rate %llu Mbps\n",q->rate.rate_bps/1000000);
 
  done:
 	return err;
@@ -718,28 +716,29 @@ static int dwrr_init(struct Qdisc *sch, struct nlattr *opt)
 	struct dwrr_sched_data *q = qdisc_priv(sch);
 	struct Qdisc *child;
 
-	if (sch->parent != TC_H_ROOT)
+	if(sch->parent != TC_H_ROOT)
 		return -EOPNOTSUPP;
 
-	q->queues = kcalloc(DWRR_MAX_QUEUES, sizeof(struct dwrr_class), GFP_KERNEL);
-	if (!(q->queues))
+	q->queues = kcalloc(dwrr_max_queues,
+			    sizeof(struct dwrr_class),
+			    GFP_KERNEL);
+	if (unlikely(!(q->queues)))
 		return -ENOMEM;
 
 	q->tokens = 0;
 	q->time_ns = ktime_get_ns();
-	q->last_idle_time_ns = ktime_get_ns();
+	q->last_idle_time = ktime_get_ns();
 	q->sum_len_bytes = 0;
-	q->round_time_ns = 0;
-	q->quantum_sum = 0;
-	q->quantum_sum_estimate = 0;
+	q->round_time = 0;
 	qdisc_watchdog_init(&q->watchdog, sch);
-	INIT_LIST_HEAD(&(q->active_list));
+	INIT_LIST_HEAD(&(q->active));
 
-	for (i = 0;i < DWRR_MAX_QUEUES; i++)
+	for (i = 0;i < dwrr_max_queues; i++)
 	{
 		/* bfifo is in bytes */
-		child = fifo_create_dflt(sch, &bfifo_qdisc_ops, DWRR_MAX_BUFFER_BYTES);
-		if (child!=NULL)
+		child = fifo_create_dflt(sch,
+					&bfifo_qdisc_ops, dwrr_max_buffer_bytes);
+		if (likely(child))
 			(q->queues[i]).qdisc = child;
 		else
 			goto err;
@@ -748,12 +747,9 @@ static int dwrr_init(struct Qdisc *sch, struct nlattr *opt)
 		INIT_LIST_HEAD(&((q->queues[i]).alist));
 		(q->queues[i]).id = i;
 		(q->queues[i]).deficit = 0;
-		(q->queues[i]).active = 0;
-		(q->queues[i]).curr = 0;
 		(q->queues[i]).len_bytes = 0;
-		(q->queues[i]).start_time_ns = ktime_get_ns();
-		(q->queues[i]).last_pkt_time_ns = ktime_get_ns();
-		(q->queues[i]).last_pkt_len_ns = 0;
+		(q->queues[i]).start_time = ktime_get_ns();
+		(q->queues[i]).last_pkt_time = ktime_get_ns();
 		(q->queues[i]).quantum = 0;
 		(q->queues[i]).count = 0;
 		(q->queues[i]).lastcount = 0;
@@ -774,20 +770,20 @@ static struct Qdisc_ops dwrr_ops __read_mostly = {
 	.cl_ops		=	NULL,
 	.id		=	"tbf",
 	.priv_size	=	sizeof(struct dwrr_sched_data),
-	.init 		=	dwrr_init,
-	.destroy 	=	dwrr_destroy,
-	.enqueue 	=	dwrr_enqueue,
-	.dequeue 	=	dwrr_dequeue,
-	.peek 		=	dwrr_peek,
-	.drop 		=	dwrr_drop,
+	.init		=	dwrr_init,
+	.destroy	=	dwrr_destroy,
+	.enqueue	=	dwrr_enqueue,
+	.dequeue	=	dwrr_dequeue,
+	.peek		=	dwrr_peek,
+	.drop		=	dwrr_drop,
 	.change		=	dwrr_change,
 	.dump		=	dwrr_dump,
-	.owner		=	THIS_MODULE,
+	.owner 		= 	THIS_MODULE,
 };
 
 static int __init dwrr_module_init(void)
 {
-	if (!dwrr_params_init())
+	if (unlikely(!dwrr_params_init()))
 		return -1;
 
 	printk(KERN_INFO "sch_dwrr: start working\n");

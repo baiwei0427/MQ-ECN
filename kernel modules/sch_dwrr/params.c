@@ -2,182 +2,182 @@
 #include <linux/sysctl.h>
 #include <linux/string.h>
 
-/* Debug mode or not. By default, we disable debug mode */
-int DWRR_DEBUG_MODE = DWRR_DEBUG_OFF;
-/* Buffer management mode: shared (0) or static (1). By default, we enable shread buffer. */
-int DWRR_BUFFER_MODE = DWRR_SHARED_BUFFER;
-/* Per port shared buffer (bytes) */
-int DWRR_SHARED_BUFFER_BYTES = 96000;
-/* Bucket size in bytes. By default, we use 2.5KB for 1G network. */
-int DWRR_BUCKET_BYTES = 2500;
-/* Per port ECN marking threshold (bytes). By default, we use 32KB for 1G network. */
-int DWRR_PORT_THRESH_BYTES = 32000;
-/* ECN marking scheme. By default, we use per queue ECN. */
-int DWRR_ECN_SCHEME = DWRR_QUEUE_ECN;
-/* Alpha for quantum sum estimation. It is 0.75 (768/1024) by default. */
-int DWRR_QUANTUM_ALPHA = 768;
-/* Alpha for round time estimation. It is 0.75 (768/1024) by default. */
-int DWRR_ROUND_ALPHA = 768;
-/* Idle time slot. It is 12us by default */
-int DWRR_IDLE_INTERVAL_NS = 12000;
-/* TCN threshold (1024 nanoseconds) */
-int DWRR_TCN_THRESH = 250;
-/* CoDel target (1024 nanoseconds) */
-int DWRR_CODEL_TARGET = 250;
-/* CoDel interval (1024 nanoseconds) */
-int DWRR_CODEL_INTERVAL = 625;
 
-int DWRR_DEBUG_MODE_MIN = DWRR_DEBUG_OFF;
-int DWRR_DEBUG_MODE_MAX = DWRR_DEBUG_ON;
-int DWRR_BUFFER_MODE_MIN = DWRR_SHARED_BUFFER;
-int DWRR_BUFFER_MODE_MAX = DWRR_STATIC_BUFFER;
-int DWRR_ECN_SCHEME_MIN = DWRR_DISABLE_ECN;
-int DWRR_ECN_SCHEME_MAX = DWRR_CODEL;
-int DWRR_QUANTUM_ALPHA_MIN = 0;
-int DWRR_QUANTUM_ALPHA_MAX = (1 << 10);
-int DWRR_ROUND_ALPHA_MIN = 0;
-int DWRR_ROUND_ALPHA_MAX = (1 << 10);
-int DWRR_DSCP_MIN = 0;
-int DWRR_DSCP_MAX = 63;
-int DWRR_QUANTUM_MIN = DWRR_MAX_PKT_BYTES;
-int DWRR_QUANTUM_MAX = (200 << 10);
+/* Enable debug mode or not. By default, we disable debug mode. */
+int dwrr_enable_debug = dwrr_disable;
+/*
+ * Buffer management mode: shared (0) or static (1).
+ * By default, we enable shread buffer.
+ */
+int dwrr_buffer_mode = dwrr_shared_buffer;
+/* Per port shared buffer (bytes) */
+int dwrr_shared_buffer_bytes = dwrr_max_buffer_bytes;
+/* Bucket size in bytes. By default, we use 2.5KB for 1G network. */
+int dwrr_bucket_bytes = 2500;
+/*
+ * Per port ECN marking threshold (bytes).
+ * By default, we use 32KB for 1G network.
+ */
+int dwrr_port_thresh_bytes = 32000;
+/* ECN marking scheme. By default, we perform per queue ECN/RED marking. */
+int dwrr_ecn_scheme = dwrr_queue_ecn;
+/* Alpha for round time estimation. It is 0.75 by default. */
+int dwrr_round_alpha = (3 << dwrr_round_alpha_shift) / 4;
+/* Idle time slot. It is 12us by default */
+int dwrr_idle_interval_ns = 12000;
+/* By default, we disable WRR */
+int dwrr_enable_wrr = dwrr_disable;
+/* By default, we perform enqueue ECN marking. */
+int dwrr_enable_dequeue_ecn = dwrr_disable;
+/* TCN threshold (1024 nanoseconds) */
+int dwrr_tcn_thresh = 250;
+/* CoDel target (1024 nanoseconds) */
+int dwrr_codel_target = 100;
+/* CoDel interval (1024 nanoseconds) */
+int dwrr_codel_interval = 2000;
+
+int dwrr_enable_min = dwrr_disable;
+int dwrr_enable_max = dwrr_enable;
+int dwrr_buffer_mode_min = dwrr_shared_buffer;
+int dwrr_buffer_mode_max = dwrr_static_buffer;
+int dwrr_ecn_scheme_min = dwrr_disable_ecn;
+int dwrr_ecn_scheme_max = dwrr_codel;
+int dwrr_round_alpha_min = 0;
+int dwrr_round_alpha_max = 1 << dwrr_round_alpha_shift;
+int dwrr_dscp_min = 0;
+int dwrr_dscp_max = (1 << 6) - 1;
+int dwrr_quantum_min = dwrr_max_pkt_bytes;
+int dwrr_quantum_max = 200 << 10;
 
 /* Per queue ECN marking threshold (bytes) */
-int DWRR_QUEUE_THRESH_BYTES[DWRR_MAX_QUEUES];
+int dwrr_queue_thresh_bytes[dwrr_max_queues];
 /* DSCP value for different queues*/
-int DWRR_QUEUE_DSCP[DWRR_MAX_QUEUES];
+int dwrr_queue_dscp[dwrr_max_queues];
 /* Quantum for different queues*/
-int DWRR_QUEUE_QUANTUM[DWRR_MAX_QUEUES];
+int dwrr_queue_quantum[dwrr_max_queues];
 /* Per queue minimum guarantee buffer (bytes) */
-int DWRR_QUEUE_BUFFER_BYTES[DWRR_MAX_QUEUES];
+int dwrr_queue_buffer_bytes[dwrr_max_queues];
 
-/* All parameters that can be configured through sysctl. We have DWRR_GLOBAL_PARAMS + 4 * DWRR_MAX_QUEUES parameters in total. */
-struct dwrr_param DWRR_PARAMS[DWRR_GLOBAL_PARAMS + 4 * DWRR_MAX_QUEUES + 1] =
+/*
+ * All parameters that can be configured through sysctl.
+ * We have dwrr_global_params + 4 * dwrr_max_queues parameters in total.
+ */
+struct dwrr_param dwrr_params[dwrr_total_params + 1] =
 {
-	{"debug_mode",		&DWRR_DEBUG_MODE},
-	{"buffer_mode",		&DWRR_BUFFER_MODE},
-	{"shared_buffer_bytes",	&DWRR_SHARED_BUFFER_BYTES},
-	{"bucket_bytes",	&DWRR_BUCKET_BYTES},
-	{"port_thresh_bytes",	&DWRR_PORT_THRESH_BYTES},
-	{"ecn_scheme",		&DWRR_ECN_SCHEME},
-	{"round_alpha",		&DWRR_ROUND_ALPHA},
-	{"quantum_alpha",	&DWRR_QUANTUM_ALPHA},
-	{"idle_interval_ns",	&DWRR_IDLE_INTERVAL_NS},
-	{"tcn_thresh",		&DWRR_TCN_THRESH},
-	{"codel_target",	&DWRR_CODEL_TARGET},
-	{"codel_interval",	&DWRR_CODEL_INTERVAL},
+	/* Global parameters */
+	{"enable_debug",	&dwrr_enable_debug},
+	{"buffer_mode",		&dwrr_buffer_mode},
+	{"shared_buffer",	&dwrr_shared_buffer_bytes},
+	{"bucket", 		&dwrr_bucket_bytes},
+	{"port_thresh", 	&dwrr_port_thresh_bytes},
+	{"ecn_scheme", 		&dwrr_ecn_scheme},
+	{"round_alpha", 	&dwrr_round_alpha},
+	{"idle_interval_ns",	&dwrr_idle_interval_ns},
+	{"enable_wrr",		&dwrr_enable_wrr},
+	{"enable_dequeue_ecn",	&dwrr_enable_dequeue_ecn},
+	{"tcn_thresh",		&dwrr_tcn_thresh},
+	{"codel_target",	&dwrr_codel_target},
+	{"codel_interval",	&dwrr_codel_interval},
 };
 
-struct ctl_table DWRR_PARAMS_TABLE[DWRR_GLOBAL_PARAMS + 4 * DWRR_MAX_QUEUES + 1];
+struct ctl_table dwrr_params_table[dwrr_total_params + 1];
 
-struct ctl_path DWRR_PARAMS_PATH[] =
+struct ctl_path dwrr_params_path[] =
 {
 	{ .procname = "dwrr" },
 	{ },
 };
 
-struct ctl_table_header *DWRR_SYSCTL = NULL;
+struct ctl_table_header *dwrr_sysctl = NULL;
 
-bool dwrr_params_init()
+bool dwrr_params_init(void)
 {
-	int i = 0;
-	memset(DWRR_PARAMS_TABLE, 0, sizeof(DWRR_PARAMS_TABLE));
+	int i, index;
+	memset(dwrr_params_table, 0, sizeof(dwrr_params_table));
 
-	for (i = 0; i < DWRR_MAX_QUEUES; i++)
+	for (i = 0; i < dwrr_max_queues; i++)
 	{
-		/* Initialize DWRR_QUEUE_THRESH_BYTES[DWRR_MAX_QUEUES]*/
-		snprintf(DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i].name,
-			 63, "queue_thresh_bytes_%d", i);
-		DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i].ptr = &DWRR_QUEUE_THRESH_BYTES[i];
-		DWRR_QUEUE_THRESH_BYTES[i] = DWRR_PORT_THRESH_BYTES;
+		/* Per queue ECN marking threshold*/
+		index = dwrr_global_params + i;
+		snprintf(dwrr_params[index].name, 63, "queue_thresh_%d", i);
+		dwrr_params[index].ptr = &dwrr_queue_thresh_bytes[i];
+		dwrr_queue_thresh_bytes[i] = dwrr_port_thresh_bytes;
 
-		/* Initialize DWRR_QUEUE_DSCP[DWRR_MAX_QUEUES] */
-		snprintf(DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + DWRR_MAX_QUEUES].name,
-			 63, "queue_dscp_%d", i);
-		DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + DWRR_MAX_QUEUES].ptr = &DWRR_QUEUE_DSCP[i];
-		DWRR_QUEUE_DSCP[i] = i;
+		/* Per-queue DSCP */
+		index = dwrr_global_params + i + dwrr_max_queues;
+		snprintf(dwrr_params[index].name, 63, "queue_dscp_%d", i);
+		dwrr_params[index].ptr = &dwrr_queue_dscp[i];
+		dwrr_queue_dscp[i] = i;
 
-		/* Initialize DWRR_QUEUE_QUANTUM[DWRR_MAX_QUEUES] */
-		snprintf(DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 2 * DWRR_MAX_QUEUES].name,
-			 63, "queue_quantum_%d", i);
-		DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 2 * DWRR_MAX_QUEUES].ptr = &DWRR_QUEUE_QUANTUM[i];
-		DWRR_QUEUE_QUANTUM[i] = DWRR_MAX_PKT_BYTES;
+		/* Per-queue Quantum */
+		index = dwrr_global_params + i + 2 * dwrr_max_queues;
+		snprintf(dwrr_params[index].name, 63, "queue_quantum_%d", i);
+		dwrr_params[index].ptr = &dwrr_queue_quantum[i];
+		dwrr_queue_quantum[i] = dwrr_max_pkt_bytes;
 
-		/* Initialize DWRR_QUEUE_BUFFER_BYTES[DWRR_MAX_QUEUES] */
-		snprintf(DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 3 * DWRR_MAX_QUEUES].name,
-			 63, "queue_buffer_bytes_%d", i);
-		DWRR_PARAMS[DWRR_GLOBAL_PARAMS + i + 3 * DWRR_MAX_QUEUES].ptr = &DWRR_QUEUE_BUFFER_BYTES[i];
-		DWRR_QUEUE_BUFFER_BYTES[i] = DWRR_MAX_BUFFER_BYTES;
+		/* Per-queue buffer size */
+		index = dwrr_global_params + i + 3 * dwrr_max_queues;
+		snprintf(dwrr_params[index].name, 63, "queue_buffer_%d", i);
+		dwrr_params[index].ptr = &dwrr_queue_buffer_bytes[i];
+		dwrr_queue_buffer_bytes[i] = dwrr_max_buffer_bytes;
 	}
 
 	/* End of the parameters */
-	DWRR_PARAMS[DWRR_GLOBAL_PARAMS + 4 * DWRR_MAX_QUEUES].ptr = NULL;
+	dwrr_params[dwrr_global_params + 4 * dwrr_max_queues].ptr = NULL;
 
-	for (i = 0; i < DWRR_GLOBAL_PARAMS + 4 * DWRR_MAX_QUEUES + 1; i++)
+	for (i = 0; i < dwrr_global_params + 4 * dwrr_max_queues; i++)
 	{
-		struct ctl_table *entry = &DWRR_PARAMS_TABLE[i];
-
-		/* End */
-		if (!DWRR_PARAMS[i].ptr)
-			break;
+		struct ctl_table *entry = &dwrr_params_table[i];
 
 		/* Initialize entry (ctl_table) */
-		entry->procname = DWRR_PARAMS[i].name;
-		entry->data = DWRR_PARAMS[i].ptr;
+		entry->procname = dwrr_params[i].name;
+		entry->data = dwrr_params[i].ptr;
 		entry->mode = 0644;
 
-		/* DWRR_DEBUG_MODE */
-		if (i == 0)
+		/* enable_debug, enable_wrr and enable_dequeue_ecn */
+		if (i == 0 || i == 8 || i == 9)
 		{
 			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_DEBUG_MODE_MIN;
-			entry->extra2 = &DWRR_DEBUG_MODE_MAX;
+			entry->extra1 = &dwrr_enable_min;
+			entry->extra2 = &dwrr_enable_max;
 		}
-		/* DWRR_BUFFER_MODE */
+		/* buffer_mode */
 		else if (i == 1)
 		{
 			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_BUFFER_MODE_MIN;
-			entry->extra2 = &DWRR_BUFFER_MODE_MAX;
+			entry->extra1 = &dwrr_buffer_mode_min;
+			entry->extra2 = &dwrr_buffer_mode_max;
 		}
-		/* DWRR_ECN_SCHEME */
+		/* ecn_scheme */
 		else if (i == 5)
 		{
 			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_ECN_SCHEME_MIN;
-			entry->extra2 = &DWRR_ECN_SCHEME_MAX;
+			entry->extra1 = &dwrr_ecn_scheme_min;
+			entry->extra2 = &dwrr_ecn_scheme_max;
 		}
-		/* DWRR_QUANTUM_ALPHA*/
+		/* round_alpha */
 		else if (i == 6)
 		{
 			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_QUANTUM_ALPHA_MIN;
-			entry->extra2 = &DWRR_QUANTUM_ALPHA_MAX;
+			entry->extra1 = &dwrr_round_alpha_min;
+			entry->extra2 = &dwrr_round_alpha_max;
 		}
-		/* DWRR_ROUND_ALPHA */
-		else if (i == 7)
+		/* Per-queue DSCP */
+		else if (i >= dwrr_global_params + dwrr_max_queues &&
+			 i < dwrr_global_params + 2 * dwrr_max_queues)
 		{
 			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_ROUND_ALPHA_MIN;
-			entry->extra2 = &DWRR_ROUND_ALPHA_MAX;
+			entry->extra1 = &dwrr_dscp_min;
+			entry->extra2 = &dwrr_dscp_max;
 		}
-		/* DWRR_QUEUE_DSCP[] */
-		else if (i >= DWRR_GLOBAL_PARAMS + DWRR_MAX_QUEUES &&
-			 i < DWRR_GLOBAL_PARAMS + 2 * DWRR_MAX_QUEUES)
+		/* Per-queue quantum */
+		else if (i >= dwrr_global_params + 2 * dwrr_max_queues &&
+			 i < dwrr_global_params + 3 * dwrr_max_queues)
 		{
 			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_DSCP_MIN;
-			entry->extra2 = &DWRR_DSCP_MAX;
+			entry->extra1 = &dwrr_quantum_min;
+			entry->extra2 = &dwrr_quantum_max;
 		}
-		/* DWRR_QUEUE_QUANTUM[] */
-		else if (i >= DWRR_GLOBAL_PARAMS + 2 * DWRR_MAX_QUEUES &&
-			 i < DWRR_GLOBAL_PARAMS + 3 * DWRR_MAX_QUEUES)
-		{
-			entry->proc_handler = &proc_dointvec_minmax;
-			entry->extra1 = &DWRR_QUANTUM_MIN;
-			entry->extra2 = &DWRR_QUANTUM_MAX;
-		}
-		/*DWRR_QUEUE_ECN_THRESH[] and DWRR_QUEUE_BUFFER_BYTES[] */
 		else
 		{
 			entry->proc_handler = &proc_dointvec;
@@ -185,8 +185,10 @@ bool dwrr_params_init()
 		entry->maxlen=sizeof(int);
 	}
 
-	DWRR_SYSCTL = register_sysctl_paths(DWRR_PARAMS_PATH, DWRR_PARAMS_TABLE);
-	if (likely(DWRR_SYSCTL))
+	dwrr_sysctl = register_sysctl_paths(dwrr_params_path,
+					    dwrr_params_table);
+
+	if (likely(dwrr_sysctl))
 		return true;
 	else
 		return false;
@@ -195,6 +197,6 @@ bool dwrr_params_init()
 
 void dwrr_params_exit()
 {
-	if (likely(DWRR_SYSCTL))
-		unregister_sysctl_table(DWRR_SYSCTL);
+	if (likely(dwrr_sysctl))
+		unregister_sysctl_table(dwrr_sysctl);
 }
