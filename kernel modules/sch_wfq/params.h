@@ -3,68 +3,116 @@
 
 #include <linux/types.h>
 
+/*
+ * CoDel uses a 1024 nsec clock, encoded in u32
+ * This gives a range of 2199 seconds, because of signed compares
+ */
+typedef u32 codel_time_t;
+typedef s32 codel_tdiff_t;
+
+/* Dealing with timer wrapping, according to RFC 1982, as desc in wikipedia:
+ *  https://en.wikipedia.org/wiki/Serial_number_arithmetic#General_Solution
+ * codel_time_after(a,b) returns true if the time a is after time b.
+ */
+#define codel_time_after(a, b)						\
+	(typecheck(codel_time_t, a) &&					\
+	 typecheck(codel_time_t, b) &&					\
+	 ((s32)((a) - (b)) > 0))
+#define codel_time_before(a, b) 	codel_time_after(b, a)
+
+#define codel_time_after_eq(a, b)					\
+	(typecheck(codel_time_t, a) &&					\
+	 typecheck(codel_time_t, b) &&					\
+	 ((s32)((a) - (b)) >= 0))
+#define codel_time_before_eq(a, b)	codel_time_after_eq(b, a)
+
+
 /* Our module has at most 8 queues */
-#define WFQ_QDISC_MAX_QUEUES 8
-/* MTU(1500B)+Ethernet header(14B)+Frame check sequence (4B)+Frame check sequence(8B)+Interpacket gap(12B) */
-#define WFQ_QDISC_MTU_BYTES 1538
-/* Ethernet packets with less than the minimum 64 bytes (header (14B) + user data + FCS (4B)) are padded to 64 bytes. */
-#define WFQ_QDISC_MIN_PKT_BYTES 64
-/* Maximum (per queue/per port shared) buffer size (2MB)*/
-#define WFQ_QDISC_MAX_BUFFER_BYTES 2000000
-
-/* Debug mode is off */
-#define	WFQ_QDISC_DEBUG_OFF 0
-/* Debug mode is on */
-#define	WFQ_QDISC_DEBUG_ON 1
-
+#define wfq_max_queues 8
+/*
+ * 1538 = MTU (1500B) + Ethernet header(14B) + Frame check sequence (4B) +
+ * Frame check sequence(8B) + Interpacket gap(12B)
+ */
+#define wfq_max_pkt_bytes 1538
+/*
+ * Ethernet packets with less than the minimum 64 bytes
+ * (header (14B) + user data + FCS (4B)) are padded to 64 bytes.
+ */
+#define wfq_min_pkt_bytes 64
+/* Maximum (per queue/per port shared) buffer size (2MB) */
+#define wfq_max_buffer_bytes 2000000
 /* Per port shared buffer management policy */
-#define	WFQ_QDISC_SHARED_BUFFER 0
+#define	wfq_shared_buffer 0
 /* Per port static buffer management policy */
-#define	WFQ_QDISC_STATIC_BUFFER 1
+#define	wfq_static_buffer 1
 
 /* Disable ECN marking */
-#define	WFQ_QDISC_DISABLE_ECN 0
+#define	wfq_disable_ecn 0
 /* Per queue ECN marking */
-#define	WFQ_QDISC_QUEUE_ECN 1
+#define	wfq_queue_ecn 1
 /* Per port ECN marking */
-#define WFQ_QDISC_PORT_ECN 2
-/* Dequeue latency-based ECN marking. This is a general ECN marking approach for any packet scheduler */
-#define WFQ_QDISC_DEQUE_ECN 5
+#define wfq_port_ecn 2
+/* MQ-ECN. Note that MQ-ECN cannot support WFQ. It actually has no use here. */
+#define wfq_mq_ecn 3
+/* TCN */
+#define wfq_tcn 4
+/* CoDel */
+#define wfq_codel 5
 
+/* For CoDel timestamp */
+#define wfq_codel_shift 10
 
-/* Debug mode or not */
-extern int WFQ_QDISC_DEBUG_MODE;
+#define wfq_disable 0
+#define wfq_enable 1
+
+/* The number of global (rather than 'per-queue') parameters */
+#define wfq_global_params 10
+/* The total number of parameters (per-queue and global parameters) */
+#define wfq_total_params (wfq_global_params + 4 * wfq_max_queues)
+
+/* Global parameters */
+/* Enable debug mode or not */
+extern int wfq_enable_debug;
 /* Buffer management mode: shared (0) or static (1)*/
-extern int WFQ_QDISC_BUFFER_MODE;
+extern int wfq_buffer_mode;
 /* Per port shared buffer (bytes) */
-extern int WFQ_QDISC_SHARED_BUFFER_BYTES;
-/* Bucket size in nanosecond*/
-extern int WFQ_QDISC_BUCKET_NS;
+extern int wfq_shared_buffer_bytes;
+/* Bucket size in bytes*/
+extern int wfq_bucket_bytes;
 /* Per port ECN marking threshold (bytes) */
-extern int WFQ_QDISC_PORT_THRESH_BYTES;
+extern int wfq_port_thresh_bytes;
 /* ECN marking scheme */
-extern int WFQ_QDISC_ECN_SCHEME;
+extern int wfq_ecn_scheme;
+/* Enable dequeue ECN marking or not */
+extern int wfq_enable_dequeue_ecn;
+/* TCN threshold (1024 nanoseconds) */
+extern int wfq_tcn_thresh;
+/* CoDel target (1024 nanoseconds) */
+extern int wfq_codel_target;
+/* CoDel interval (1024 nanoseconds) */
+extern int wfq_codel_interval;
 
+/* Per-queue parameters */
 /* Per queue ECN marking threshold (bytes) */
-extern int WFQ_QDISC_QUEUE_THRESH_BYTES[WFQ_QDISC_MAX_QUEUES];
+extern int wfq_queue_thresh_bytes[wfq_max_queues];
 /* DSCP value for different queues */
-extern int WFQ_QDISC_QUEUE_DSCP[WFQ_QDISC_MAX_QUEUES];
-/* Weights for different queues*/
-extern int WFQ_QDISC_QUEUE_WEIGHT[WFQ_QDISC_MAX_QUEUES];
+extern int wfq_queue_dscp[wfq_max_queues];
+/* Weight for different queues*/
+extern int wfq_queue_weight[wfq_max_queues];
 /* Per queue static reserved buffer (bytes) */
-extern int WFQ_QDISC_QUEUE_BUFFER_BYTES[WFQ_QDISC_MAX_QUEUES];
+extern int wfq_queue_buffer_bytes[wfq_max_queues];
 
-struct WFQ_QDISC_Param
+struct wfq_param
 {
 	char name[64];
 	int *ptr;
 };
 
-extern struct WFQ_QDISC_Param WFQ_QDISC_Params[6 + 4 * WFQ_QDISC_MAX_QUEUES + 1];
+extern struct wfq_param wfq_params[wfq_total_params + 1];
 
 /* Intialize parameters and register sysctl */
-int wfq_qdisc_params_init(void);
+bool wfq_params_init(void);
 /* Unregister sysctl */
-void wfq_qdisc_params_exit(void);
+void wfq_params_exit(void);
 
 #endif
