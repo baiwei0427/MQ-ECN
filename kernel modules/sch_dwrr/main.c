@@ -21,11 +21,11 @@ struct dwrr_rate_cfg
 /**
  *	struct dwrr_class - a Class of Service (CoS) queue
  *	@id: queue ID
+ *	@len_bytes: queue length in bytes
  *	@qdisc: FIFO queue to store sk_buff
  *
  *	For DWRR scheduling
  *	@deficit: deficit counter of this queue (bytes)
- *	@len_bytes: queue length in bytes
  *  	@start_time: time when this queue is inserted to active list
  *	@last_pkt_time: time when this queue transmits the last packet
  *	@quantum: quantum in bytes of this queue
@@ -36,17 +36,18 @@ struct dwrr_rate_cfg
  *	@lastcount: count at entry to marking/dropping state
  *	@marking: set to true if in mark/drop state
  *	@rec_inv_sqrt: reciprocal value of sqrt(count) >> 1
- *	@first_above_time: when we went (or will go) continuously above target     *      for interval
+ *	@first_above_time: when we went (or will go) continuously above target
+ *	for interval
  *	@mark_next: time to mark next packet, or when we marked last
  *	@ldelay: sojourn time of last dequeued packet
  */
 struct dwrr_class
 {
 	int		id;
+	u32		len_bytes;
 	struct Qdisc	*qdisc;
 
 	u32	deficit;
-	u32	len_bytes;
 	s64	start_time;
 	s64	last_pkt_time;
 	u32	quantum;
