@@ -29,6 +29,9 @@ typedef s32 codel_tdiff_t;
 
 /* Our module has at most 8 queues */
 #define dwrr_max_queues 8
+/* Our module supports at most 8 priorities */
+#define dwrr_max_prio 8
+
 /*
  * 1538 = MTU (1500B) + Ethernet header(14B) + Frame check sequence (4B) +
  * Frame check sequence(8B) + Interpacket gap(12B)
@@ -62,7 +65,7 @@ typedef s32 codel_tdiff_t;
 #define dwrr_max_iteration 10
 
 /* For MQ-ECN Alpha parameter: dwrr_round_alpha */
-#define dwrr_round_alpha_shift 10
+#define dwrr_round_shift 10
 /* For CoDel timestamp */
 #define dwrr_codel_shift 10
 
@@ -71,8 +74,11 @@ typedef s32 codel_tdiff_t;
 
 /* The number of global (rather than 'per-queue') parameters */
 #define dwrr_global_params 13
+/* The number of parameters for each queue */
+#define dwrr_queue_params 5
 /* The total number of parameters (per-queue and global parameters) */
-#define dwrr_total_params (dwrr_global_params + 4 * dwrr_max_queues)
+#define dwrr_total_params (dwrr_global_params + dwrr_queue_params * \
+	                   dwrr_max_queues)
 
 /* Global parameters */
 /* Enable debug mode or not */
@@ -111,6 +117,8 @@ extern int dwrr_queue_dscp[dwrr_max_queues];
 extern int dwrr_queue_quantum[dwrr_max_queues];
 /* Per queue static reserved buffer (bytes) */
 extern int dwrr_queue_buffer_bytes[dwrr_max_queues];
+/* Per queue priority (high or low) */
+extern int dwrr_queue_prio[dwrr_max_queues];
 
 struct dwrr_param
 {

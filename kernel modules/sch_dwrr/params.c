@@ -22,7 +22,7 @@ int dwrr_port_thresh_bytes = 32000;
 /* ECN marking scheme. By default, we perform per queue ECN/RED marking. */
 int dwrr_ecn_scheme = dwrr_queue_ecn;
 /* Alpha for round time estimation. It is 0.75 by default. */
-int dwrr_round_alpha = (3 << dwrr_round_alpha_shift) / 4;
+int dwrr_round_alpha = (3 << dwrr_round_shift) / 4;
 /* Idle time slot. It is 12us by default */
 int dwrr_idle_interval_ns = 12000;
 /* By default, we disable WRR */
@@ -38,12 +38,14 @@ int dwrr_codel_interval = 2000;
 
 int dwrr_enable_min = dwrr_disable;
 int dwrr_enable_max = dwrr_enable;
+int dwrr_prio_min = 0;
+int dwrr_prio_max = dwrr_max_prio - 1;
 int dwrr_buffer_mode_min = dwrr_shared_buffer;
 int dwrr_buffer_mode_max = dwrr_static_buffer;
 int dwrr_ecn_scheme_min = dwrr_disable_ecn;
 int dwrr_ecn_scheme_max = dwrr_codel;
 int dwrr_round_alpha_min = 0;
-int dwrr_round_alpha_max = 1 << dwrr_round_alpha_shift;
+int dwrr_round_alpha_max = 1 << dwrr_round_shift;
 int dwrr_dscp_min = 0;
 int dwrr_dscp_max = (1 << 6) - 1;
 int dwrr_quantum_min = dwrr_max_pkt_bytes;
@@ -57,11 +59,11 @@ int dwrr_queue_dscp[dwrr_max_queues];
 int dwrr_queue_quantum[dwrr_max_queues];
 /* Per queue minimum guarantee buffer (bytes) */
 int dwrr_queue_buffer_bytes[dwrr_max_queues];
+/* Per queue priority (high or low) */
+int dwrr_queue_prio[dwrr_max_queues];
 
-/*
- * All parameters that can be configured through sysctl.
- * We have dwrr_global_params + 4 * dwrr_max_queues parameters in total.
- */
+
+/* All parameters that can be configured through sysctl */
 struct dwrr_param dwrr_params[dwrr_total_params + 1] =
 {
 	/* Global parameters */
@@ -120,12 +122,18 @@ bool dwrr_params_init(void)
 		snprintf(dwrr_params[index].name, 63, "queue_buffer_%d", i);
 		dwrr_params[index].ptr = &dwrr_queue_buffer_bytes[i];
 		dwrr_queue_buffer_bytes[i] = dwrr_max_buffer_bytes;
+
+		/* Per-queue priority */
+		index = dwrr_global_params + i + 4 * dwrr_max_queues;
+		snprintf(dwrr_params[index].name, 63, "queue_prio_%d", i);
+		dwrr_params[index].ptr = &dwrr_queue_prio[i];
+		dwrr_queue_prio[i] = 0;
 	}
 
 	/* End of the parameters */
-	dwrr_params[dwrr_global_params + 4 * dwrr_max_queues].ptr = NULL;
+	dwrr_params[dwrr_total_params].ptr = NULL;
 
-	for (i = 0; i < dwrr_global_params + 4 * dwrr_max_queues; i++)
+	for (i = 0; i < dwrr_total_params; i++)
 	{
 		struct ctl_table *entry = &dwrr_params_table[i];
 
@@ -177,6 +185,13 @@ bool dwrr_params_init(void)
 			entry->proc_handler = &proc_dointvec_minmax;
 			entry->extra1 = &dwrr_quantum_min;
 			entry->extra2 = &dwrr_quantum_max;
+		}
+		/* Per-queue priority */
+		else if (i >= dwrr_global_params + 4 * dwrr_max_queues)
+		{
+			entry->proc_handler = &proc_dointvec_minmax;
+			entry->extra1 = &dwrr_prio_min;
+			entry->extra2 = &dwrr_prio_max;
 		}
 		else
 		{

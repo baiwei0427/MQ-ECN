@@ -21,15 +21,16 @@ struct dwrr_rate_cfg
 /**
  *	struct dwrr_class - a Class of Service (CoS) queue
  *	@id: queue ID
+ *	@prio: queue priority (0 is the highest)
  *	@len_bytes: queue length in bytes
  *	@qdisc: FIFO queue to store sk_buff
  *
  *	For DWRR scheduling
  *	@deficit: deficit counter of this queue (bytes)
- *  	@start_time: time when this queue is inserted to active list
+ *	@start_time: time when this queue is inserted to active list
  *	@last_pkt_time: time when this queue transmits the last packet
  *	@quantum: quantum in bytes of this queue
- *  	@alist: active linked list
+ *	@alist: active linked list
  *
  *	For CoDel
  *	@count: how many marks since the last time we entered marking state
@@ -43,14 +44,15 @@ struct dwrr_rate_cfg
  */
 struct dwrr_class
 {
-	int		id;
+	u8		id;
+	u8		prio;
 	u32		len_bytes;
 	struct Qdisc	*qdisc;
 
-	u32	deficit;
-	s64	start_time;
-	s64	last_pkt_time;
-	u32	quantum;
+	u32		deficit;
+	s64		start_time;
+	s64		last_pkt_time;
+	u32		quantum;
 	struct list_head	alist;
 
 	u32		count;
@@ -63,30 +65,33 @@ struct dwrr_class
 };
 
 /**
- *	struct dwrr_sched_data - DWRR scheduler
+ *	struct wfq_sched_data - DWRR scheduler
  *	@queues: multiple Class of Service (CoS) queues
  *	@rate: shaping rate
- *	@active: linked list to store active queues
  *	@watchdog: watchdog timer for token bucket rate limiter
+ *	@active: active queues for different priorities
  *
  *	@tokens: tokens in ns
- *	@sum_len_bytes: the total buffer occupancy (in bytes) of the switch port
  *	@time_ns: time check-point
- *	@round_time: estimation of round time in ns
- *	@last_idle_time: last time when the port is idle
+ *	@sum_len_bytes: the total buffer occupancy (in bytes)
+ *	@prio_len_bytes: buffer occupancy (in bytes) for different priorities
+ *	@round_time: smooth round time (in ns) for different priorities
+ *	@last_idle_time: last time (in ns) when the buffer becomes empty for
+ *	different priorities
  */
 struct dwrr_sched_data
 {
-	struct dwrr_class	*queues;
+	struct dwrr_class	queues[dwrr_max_queues];
 	struct dwrr_rate_cfg	rate;
-	struct list_head	active;
 	struct qdisc_watchdog	watchdog;
+	struct list_head	active[dwrr_max_prio];
 
 	s64	tokens;
-	u32	sum_len_bytes;
 	s64	time_ns;
-	s64	round_time;
-	s64	last_idle_time;
+	u32	sum_len_bytes;
+	u32	prio_len_bytes[dwrr_max_prio];
+	s64	round_time[dwrr_max_prio];
+	s64	last_idle_time[dwrr_max_prio];
 };
 
 /* nanosecond to codel time (1 << dwrr_codel_shift ns) */
@@ -101,6 +106,44 @@ static inline s64 s64_ewma(s64 smooth, s64 sample, int weight, int shift)
 	s64 val = smooth * weight;
 	val += sample * ((1 << shift) - weight);
 	return val >> shift;
+}
+
+/* Use EWMA to update round time */
+static inline s64 ewma_round(s64 smooth, s64 sample)
+{
+	return s64_ewma(smooth, sample, dwrr_round_alpha, dwrr_round_shift);
+}
+
+/* Reset round time after a long period of idle time */
+static void reset_round(struct dwrr_sched_data *q, int prio)
+{
+	int i;
+	s64 interval, iter = 0;
+
+	if (likely(q->prio_len_bytes[prio] == 0 && dwrr_idle_interval_ns > 0))
+	{
+		interval = ktime_get_ns() - q->last_idle_time[prio];
+		iter = div_s64(interval, dwrr_idle_interval_ns);
+	}
+
+	if (iter > dwrr_max_iteration || unlikely(iter < 0))
+	{
+		q->round_time[prio] = 0;
+		return;
+	}
+
+	for (i = 0; i < iter; i++)
+		q->round_time[prio] = ewma_round(q->round_time[prio], 0);
+}
+
+static inline void print_round(s64 smooth, s64 sample)
+{
+	/* Print necessary information in debug mode */
+	if (dwrr_enable_debug == dwrr_enable && dwrr_ecn_scheme == dwrr_mq_ecn)
+	{
+		printk(KERN_INFO "sample round time %lld\n", sample);
+		printk(KERN_INFO "smooth round time %lld\n", smooth);
+	}
 }
 
 /*
@@ -140,17 +183,17 @@ static void mq_ecn_marking(struct sk_buff *skb,
 		      	   struct dwrr_class *cl)
 {
 	u64 ecn_thresh_bytes, estimate_rate_bps;
+	s64 round_time = q->round_time[cl->prio];
 
-	if (q->round_time > 0)
-		estimate_rate_bps = div_u64((u64)cl->quantum << 33,
-					    q->round_time);
+	if (round_time > 0)
+		estimate_rate_bps = div_u64((u64)cl->quantum << 33, round_time);
 	else
 		estimate_rate_bps = q->rate.rate_bps;
 
 	/* rate <= link capacity */
 	estimate_rate_bps = min_t(u64, estimate_rate_bps, q->rate.rate_bps);
-	ecn_thresh_bytes = div_u64(estimate_rate_bps * dwrr_port_thresh_bytes,
-				   q->rate.rate_bps);
+	ecn_thresh_bytes = div64_u64(estimate_rate_bps * dwrr_port_thresh_bytes,
+				     q->rate.rate_bps);
 
 	if (cl->len_bytes > ecn_thresh_bytes)
 		INET_ECN_set_ce(skb);
@@ -364,63 +407,6 @@ static struct sk_buff *dwrr_peek(struct Qdisc *sch)
 	return NULL;
 }
 
-/* Choose the packet to schedule according to DWRR algorithm */
-/*static struct sk_buff *dwrr_schedule(struct dwrr_sched_data *q,
-				     struct dwrr_class *cl)
-{
-	struct sk_buff *skb = NULL;
-	s64 sample;
-
-	while (true)
-	{
-		cl = list_first_entry(&q->active,
-				      struct dwrr_class,
-				      alist);
-
-
-		if (cl->qdisc->q.qlen == 0)
-		{
-			sample = cl->last_pkt_time - cl->start_time;
-			q->round_time = s64_ewma(q->round_time,
-						    sample,
-						    dwrr_round_alpha,
-						    dwrr_round_alpha_shift);
-			list_del(&cl->alist);
-			continue;
-		}
-
-		skb = cl->qdisc->ops->peek(cl->qdisc);
-		if (unlikely(!skb))
-			goto out;
-
-		if (skb_size(skb) <= cl->deficit)
-		{
-			return skb;
-		}
-		else
-		{
-			sample = cl->last_pkt_time - cl->start_time;
-			q->round_time = s64_ewma(q->round_time,
-						    sample,
-						    dwrr_round_alpha,
-						    dwrr_round_alpha_shift);
-
-			cl->start_time = cl->last_pkt_time;
-			cl->quantum = dwrr_queue_quantum[cl->id];
-
-			if (dwrr_enable_wrr == dwrr_enable)
-				cl->deficit = cl->quantum;
-			else
-				cl->deficit += cl->quantum;
-
-			list_move_tail(&cl->alist, &q->active);
-		}
-	}
-
-out:
-	return NULL;
-}
-*/
 
 /* Decide whether the packet can be transmitted according to Token Bucket */
 static s64 tbf_schedule(unsigned int len, struct dwrr_sched_data *q, s64 now)
@@ -436,14 +422,18 @@ static s64 tbf_schedule(unsigned int len, struct dwrr_sched_data *q, s64 now)
 	return toks - pkt_ns;
 }
 
-static inline void print_round_time(s64 sample, s64 smooth)
+/* Find the highest priority that is non-empty */
+int prio_schedule(struct dwrr_sched_data *q)
 {
-	/* Print necessary information in debug mode */
-	if (dwrr_enable_debug == dwrr_enable && dwrr_ecn_scheme == dwrr_mq_ecn)
+	int i;
+
+	for (i = 0; i < dwrr_max_prio; i++)
 	{
-		printk(KERN_INFO "sample round time %llu\n", sample);
-		printk(KERN_INFO "smooth round time %llu\n", smooth);
+		if (!list_empty(&q->active[i]))
+			return i;
 	}
+
+	return -1;
 }
 
 static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
@@ -455,14 +445,17 @@ static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
 	s64 now = ktime_get_ns();
 	s64 bucket_ns = (s64)l2t_ns(&q->rate, dwrr_bucket_bytes);
 	unsigned int len;
+	struct list_head *active = NULL;
+	int prio = prio_schedule(q);
 
-	/* No active queue */
-	if (list_empty(&q->active))
+	if (prio < 0)
 		return NULL;
+	else
+		active = &q->active[prio];
 
 	while (1)
 	{
-		cl = list_first_entry(&q->active, struct dwrr_class, alist);
+		cl = list_first_entry(active, struct dwrr_class, alist);
 		if (unlikely(!cl))
 			return NULL;
 
@@ -472,8 +465,6 @@ static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
 			return NULL;
 
 		len = skb_size(skb);
-		if (unlikely(len > dwrr_max_pkt_bytes))
-			printk(KERN_INFO "Error: pkt length %u > MTU\n", len);
 
 		/* If this packet can be scheduled by DWRR */
 		if (len <= cl->deficit)
@@ -494,6 +485,10 @@ static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
 			if (unlikely(!skb))
 				return NULL;
 
+			q->prio_len_bytes[prio] -= len;
+			if (q->prio_len_bytes[prio] == 0)
+				q->last_idle_time[prio] = now;
+
 			q->sum_len_bytes -= len;
 			sch->q.qlen--;
 			cl->len_bytes -= len;
@@ -504,14 +499,8 @@ static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
 			{
 				list_del(&cl->alist);
 				sample = cl->last_pkt_time - cl->start_time;
-				q->round_time = s64_ewma(q->round_time,
-							sample, dwrr_round_alpha, dwrr_round_alpha_shift);
-
-				/* Get start time of idle period */
-				if (q->sum_len_bytes == 0)
-					q->last_idle_time = now;
-
-				print_round_time(sample, q->round_time);
+				q->round_time[prio] = ewma_round(q->round_time[prio], sample);
+				print_round(q->round_time[prio], sample);
 			}
 
 			/* Bucket */
@@ -533,26 +522,21 @@ static struct sk_buff *dwrr_dequeue(struct Qdisc *sch)
 
 			return skb;
 		}
+
 		/* This packet can not be scheduled by DWRR */
+		sample = cl->last_pkt_time - cl->start_time;
+		q->round_time[prio] = ewma_round(q->round_time[prio], sample);
+		cl->start_time = cl->last_pkt_time;
+		cl->quantum = dwrr_queue_quantum[cl->id];
+		list_move_tail(&cl->alist, active);
+
+		/* WRR */
+		if (dwrr_enable_wrr == dwrr_enable)
+			cl->deficit = cl->quantum;
 		else
-		{
-			sample = cl->last_pkt_time - cl->start_time;
-			q->round_time = s64_ewma(q->round_time,
-						 sample,
-						 dwrr_round_alpha, dwrr_round_alpha_shift);
-			cl->start_time = cl->last_pkt_time;
-			cl->quantum = dwrr_queue_quantum[cl->id];
-			list_move_tail(&cl->alist, &q->active);
+			cl->deficit += cl->quantum;
 
-			/* WRR */
-			if (dwrr_enable_wrr == dwrr_enable)
-				cl->deficit = cl->quantum;
-			/* DWRR */
-			else
-				cl->deficit += cl->quantum;
-
-			print_round_time(sample, q->round_time);
-		}
+		print_round(q->round_time[prio], sample);
 	}
 
 	return NULL;
@@ -574,35 +558,22 @@ static bool dwrr_buffer_overfill(unsigned int len,
 		return false;
 }
 
+
 static int dwrr_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct dwrr_class *cl = NULL;
 	unsigned int len = skb_size(skb);
 	struct dwrr_sched_data *q = qdisc_priv(sch);
-	s64 interval, interval_num = 0;
-	int i, ret;
+	int ret, prio;
 
-	if (q->sum_len_bytes == 0 &&
-	    dwrr_ecn_scheme == dwrr_mq_ecn &&
-     	    dwrr_idle_interval_ns > 0)
+	cl = dwrr_classify(skb, sch);
+	if (likely(cl))
 	{
-		interval = ktime_get_ns() - q->last_idle_time;
-		interval_num = div_s64(interval, dwrr_idle_interval_ns);
+		prio = dwrr_queue_prio[cl->id];
+		if (q->prio_len_bytes[prio] == 0)
+			reset_round(q, prio);
 	}
 
-	if (interval_num > 0 && interval_num <= dwrr_max_iteration)
-	{
-		for (i = 0; i < interval_num; i++)
-			q->round_time = s64_ewma(q->round_time,
-						 0,
-						 dwrr_round_alpha, dwrr_round_alpha_shift);
-	}
-	else if (interval_num > dwrr_max_iteration)
-	{
-		q->round_time = 0;
-	}
-
-	cl = dwrr_classify(skb,sch);
 	/* No appropriate queue or the switch buffer is overfilled */
 	if (unlikely(!cl) || dwrr_buffer_overfill(len, cl, q))
 	{
@@ -623,19 +594,21 @@ static int dwrr_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		return ret;
 	}
 
-	/* Update queue sizes */
-	sch->q.qlen++;
-	q->sum_len_bytes += len;
-	cl->len_bytes += len;
-
 	/* If the queue is empty, insert it to the linked list */
 	if (cl->qdisc->q.qlen == 1)
 	{
 		cl->start_time = ktime_get_ns();
 		cl->quantum = dwrr_queue_quantum[cl->id];
+		cl->prio = prio;
 		cl->deficit = cl->quantum;
-		list_add_tail(&(cl->alist), &(q->active));
+		list_add_tail(&cl->alist, &(q->active[cl->prio]));
 	}
+
+	/* Update queue sizes (per port/priority/queue) */
+	sch->q.qlen++;
+	q->sum_len_bytes += len;
+	q->prio_len_bytes[cl->prio] += len;
+	cl->len_bytes += len;
 
 	/* sojourn time based ECN marking: TCN and CoDel */
 	if (dwrr_ecn_scheme == dwrr_tcn || dwrr_ecn_scheme == dwrr_codel)
@@ -669,8 +642,6 @@ static void dwrr_destroy(struct Qdisc *sch)
 	{
 		for (i = 0; i < dwrr_max_queues && (q->queues[i]).qdisc; i++)
 			qdisc_destroy((q->queues[i]).qdisc);
-
-		kfree(q->queues);
 	}
 	qdisc_watchdog_cancel(&q->watchdog);
 }
@@ -716,25 +687,27 @@ static int dwrr_init(struct Qdisc *sch, struct nlattr *opt)
 	int i;
 	struct dwrr_sched_data *q = qdisc_priv(sch);
 	struct Qdisc *child;
+	s64 now_ns = ktime_get_ns();
 
 	if(sch->parent != TC_H_ROOT)
 		return -EOPNOTSUPP;
 
-	q->queues = kcalloc(dwrr_max_queues,
-			    sizeof(struct dwrr_class),
-			    GFP_KERNEL);
-	if (unlikely(!(q->queues)))
-		return -ENOMEM;
-
 	q->tokens = 0;
-	q->time_ns = ktime_get_ns();
-	q->last_idle_time = ktime_get_ns();
+	q->time_ns = now_ns;
 	q->sum_len_bytes = 0;
-	q->round_time = 0;
 	qdisc_watchdog_init(&q->watchdog, sch);
-	INIT_LIST_HEAD(&(q->active));
 
-	for (i = 0;i < dwrr_max_queues; i++)
+	/* Initialize per-priority variables */
+	for (i = 0; i < dwrr_max_prio; i++)
+	{
+		INIT_LIST_HEAD(&q->active[i]);
+		q->prio_len_bytes[i] = 0;
+		q->round_time[i] = 0;
+		q->last_idle_time[i] = now_ns;
+	}
+
+	/* Initialize per-queue variables */
+	for (i = 0; i < dwrr_max_queues; i++)
 	{
 		/* bfifo is in bytes */
 		child = fifo_create_dflt(sch,
@@ -745,12 +718,13 @@ static int dwrr_init(struct Qdisc *sch, struct nlattr *opt)
 			goto err;
 
 		/* Initialize per-queue variables */
-		INIT_LIST_HEAD(&((q->queues[i]).alist));
+		INIT_LIST_HEAD(&(q->queues[i]).alist);
 		(q->queues[i]).id = i;
-		(q->queues[i]).deficit = 0;
 		(q->queues[i]).len_bytes = 0;
-		(q->queues[i]).start_time = ktime_get_ns();
-		(q->queues[i]).last_pkt_time = ktime_get_ns();
+		(q->queues[i]).prio = 0;
+		(q->queues[i]).deficit = 0;
+		(q->queues[i]).start_time = now_ns;
+		(q->queues[i]).last_pkt_time = now_ns;
 		(q->queues[i]).quantum = 0;
 		(q->queues[i]).count = 0;
 		(q->queues[i]).lastcount = 0;
