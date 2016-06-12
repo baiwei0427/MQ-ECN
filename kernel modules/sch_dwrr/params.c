@@ -59,7 +59,7 @@ int dwrr_queue_dscp[dwrr_max_queues];
 int dwrr_queue_quantum[dwrr_max_queues];
 /* Per queue minimum guarantee buffer (bytes) */
 int dwrr_queue_buffer_bytes[dwrr_max_queues];
-/* Per queue priority (high or low) */
+/* Per queue priority (0 to dwrr_max_prio - 1) */
 int dwrr_queue_prio[dwrr_max_queues];
 
 
