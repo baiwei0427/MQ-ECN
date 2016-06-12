@@ -32,6 +32,8 @@ int wfq_codel_interval = 2000;
 
 int wfq_enable_min = wfq_disable;
 int wfq_enable_max = wfq_enable;
+int wfq_prio_min = 0;
+int wfq_prio_max = wfq_max_prio - 1;
 int wfq_buffer_mode_min = wfq_shared_buffer;
 int wfq_buffer_mode_max = wfq_static_buffer;
 int wfq_ecn_scheme_min = wfq_disable_ecn;
@@ -49,6 +51,8 @@ int wfq_queue_dscp[wfq_max_queues];
 int wfq_queue_weight[wfq_max_queues];
 /* Per queue minimum guarantee buffer (bytes) */
 int wfq_queue_buffer_bytes[wfq_max_queues];
+/* Per queue priority (0 to wfq_max_prio - 1) */
+int wfq_queue_prio[wfq_max_queues];
 
 /*
  * All parameters that can be configured through sysctl.
@@ -108,12 +112,18 @@ bool wfq_params_init(void)
 		snprintf(wfq_params[index].name, 63, "queue_buffer_%d", i);
 		wfq_params[index].ptr = &wfq_queue_buffer_bytes[i];
 		wfq_queue_buffer_bytes[i] = wfq_max_buffer_bytes;
+
+		/* Per-queue priority */
+		index = wfq_global_params + i + 4 * wfq_max_queues;
+		snprintf(wfq_params[index].name, 63, "queue_prio_%d", i);
+		wfq_params[index].ptr = &wfq_queue_prio[i];
+		wfq_queue_prio[i] = 0;
 	}
 
 	/* End of the parameters */
-	wfq_params[wfq_global_params + 4 * wfq_max_queues].ptr = NULL;
+	wfq_params[wfq_total_params].ptr = NULL;
 
-	for (i = 0; i < wfq_global_params + 4 * wfq_max_queues; i++)
+	for (i = 0; i < wfq_total_params; i++)
 	{
 		struct ctl_table *entry = &wfq_params_table[i];
 
@@ -158,6 +168,13 @@ bool wfq_params_init(void)
 			entry->proc_handler = &proc_dointvec_minmax;
 			entry->extra1 = &wfq_weight_min;
 			entry->extra2 = &wfq_weight_max;
+		}
+		/* Per-queue priority */
+		else if (i >= wfq_global_params + 4 * wfq_max_queues)
+		{
+			entry->proc_handler = &proc_dointvec_minmax;
+			entry->extra1 = &wfq_prio_min;
+			entry->extra2 = &wfq_prio_max;
 		}
 		else
 		{

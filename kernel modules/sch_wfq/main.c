@@ -19,26 +19,28 @@ struct wfq_rate_cfg
 };
 
 /**
- *	struct wfq_class - a Class of Service (CoS) queue
- *	@id: queue ID
+ *      struct wfq_class - a Class of Service (CoS) queue
+ *      @id: queue ID
+ *      @prio: queue priority (0 is the highest)
  *      @len_bytes: queue length in bytes
- *	@qdisc: FIFO queue to store sk_buff
+ *      @qdisc: FIFO queue to store sk_buff
  *
- *	For WFQ scheduling
- *	@head_fin_time: virtual finish time of the head packet
+ *      For WFQ scheduling
+ *      @head_fin_time: virtual finish time of the head packet
  *
- *	For CoDel
- *	@count: how many marks since the last time we entered marking state
- *	@lastcount: count at entry to marking/dropping state
- *	@marking: set to true if in mark/drop state
- *	@rec_inv_sqrt: reciprocal value of sqrt(count) >> 1
- *	@first_above_time: when we went (or will go) continuously above target
- *	@mark_next: time to mark next packet, or when we marked last
- *	@ldelay: sojourn time of last dequeued packet
+ *      For CoDel
+ *      @count: how many marks since the last time we entered marking state
+ *      @lastcount: count at entry to marking/dropping state
+ *      @marking: set to true if in mark/drop state
+ *      @rec_inv_sqrt: reciprocal value of sqrt(count) >> 1
+ *      @first_above_time: when we went (or will go) continuously above target
+ *      @mark_next: time to mark next packet, or when we marked last
+ *      @ldelay: sojourn time of last dequeued packet
  */
 struct wfq_class
 {
-        int             id;
+        u8		id;
+	u8		prio;
         u32             len_bytes;
         struct Qdisc    *qdisc;
 
@@ -54,26 +56,29 @@ struct wfq_class
 };
 
 /**
- *	struct wfq_sched_data - WFQ scheduler
- *	@queues: multiple Class of Service (CoS) queues
- *	@rate: shaping rate
- *	@watchdog: watchdog timer for token bucket rate limiter
+ *      struct wfq_sched_data - WFQ scheduler
+ *      @queues: multiple Class of Service (CoS) queues
+ *      @rate: shaping rate
+ *      @watchdog: watchdog timer for token bucket rate limiter
  *
- *	@tokens: tokens in ns
- *	@sum_len_bytes: the total buffer occupancy (in bytes) of the switch port
- *	@time_ns: time check-point
- *      @virtual_time: virtual system time of WFQ scheduler
+ *      @tokens: tokens in ns
+ *      @time_ns: time check-point
+ *      @sum_len_bytes: the total buffer occupancy (in bytes) of the switch port
+ *      @prio_len_bytes: buffer occupancy (in bytes) for different priorities
+ *      @virtual_time: virtual system time of WFQ scheduler. We maintain a
+ *      virtual system time for each priority.
  */
 struct wfq_sched_data
 {
-        struct wfq_class        *queues;
+        struct wfq_class        queues[wfq_max_queues];
         struct wfq_rate_cfg     rate;
         struct qdisc_watchdog   watchdog;
 
         s64     tokens;
-        u32     sum_len_bytes;
         s64	time_ns;
-        u64     virtual_time;
+        u32     sum_len_bytes;
+        u32	prio_len_bytes[wfq_max_prio];
+        u64     virtual_time[wfq_max_prio];
 };
 
 /* return true if time1 is before (smaller) time2 */
@@ -336,6 +341,20 @@ static s64 tbf_schedule(unsigned int len, struct wfq_sched_data *q, s64 now)
 	return toks - pkt_ns;
 }
 
+/* Find the highest priority that is non-empty */
+int prio_schedule(struct wfq_sched_data *q)
+{
+	int i;
+
+	for (i = 0; i < wfq_max_prio; i++)
+	{
+		if (q->prio_len_bytes[i] > 0)
+			return i;
+	}
+
+	return -1;
+}
+
 static struct sk_buff *wfq_dequeue(struct Qdisc *sch)
 {
         struct wfq_sched_data *q = qdisc_priv(sch);
@@ -347,21 +366,21 @@ static struct sk_buff *wfq_dequeue(struct Qdisc *sch)
         unsigned int len;
         s64 bucket_ns = (s64)l2t_ns(&q->rate, wfq_bucket_bytes);
         s64 result, now;
+        int prio = prio_schedule(q);
 
-
-        if (q->sum_len_bytes == 0)
+        if (prio < 0)
                 return NULL;
 
         /* Find the active queue with the smallest head finish time */
         for (i = 0; i < wfq_max_queues; i++)
         {
-                if (q->queues[i].len_bytes == 0)
+                if (q->queues[i].prio != prio || q->queues[i].len_bytes == 0 )
                         continue;
 
                 if (!cl || wfq_time_before(q->queues[i].head_fin_time,
                                            min_time))
                 {
-                        cl = &(q->queues[i]);
+                        cl = &q->queues[i];
                         min_time = cl->head_fin_time;
                 }
         }
@@ -392,6 +411,7 @@ static struct sk_buff *wfq_dequeue(struct Qdisc *sch)
         q->sum_len_bytes -= len;
         sch->q.qlen--;
         cl->len_bytes -= len;
+        q->prio_len_bytes[prio] -= len;
 
         /* Set the head_fin_time for the remaining head packet */
         if (cl->len_bytes > 0)
@@ -403,9 +423,9 @@ static struct sk_buff *wfq_dequeue(struct Qdisc *sch)
                 {
                         len = skb_size(next_pkt);
                         cl->head_fin_time += div_u64((u64)len, (u32)weight);
-                        if (wfq_time_before(q->virtual_time,
+                        if (wfq_time_before(q->virtual_time[prio],
                                             cl->head_fin_time))
-                                q->virtual_time = cl->head_fin_time;
+                                q->virtual_time[prio] = cl->head_fin_time;
                 }
         }
 
@@ -452,7 +472,7 @@ static int wfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	int ret, weight;
 
 
-	cl = wfq_classify(skb,sch);
+	cl = wfq_classify(skb, sch);
 	/* No appropriate queue or the switch buffer is overfilled */
 	if (unlikely(!cl) || wfq_buffer_overfill(len, cl, q))
 	{
@@ -473,23 +493,27 @@ static int wfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		return ret;
 	}
 
-	/* Update queue sizes */
-	sch->q.qlen++;
-	q->sum_len_bytes += len;
-	cl->len_bytes += len;
-
 	/* If the queue is empty, calculate its head finish time */
 	if (cl->qdisc->q.qlen == 1)
 	{
                 weight = wfq_queue_weight[cl->id];
+                /* We only change the priority when the queue is empty */
+                cl->prio = (u8)wfq_queue_prio[cl->id];
+
                 if (likely(weight > 0))
                 {
                         cl->head_fin_time = div_u64((u64)len, (u32)weight) +
-                                            q->virtual_time;
-                        q->virtual_time = cl->head_fin_time;
+                                            q->virtual_time[cl->prio];
+                        q->virtual_time[cl->prio] = cl->head_fin_time;
 
                 }
 	}
+
+        /* Update queue sizes */
+	sch->q.qlen++;
+	q->sum_len_bytes += len;
+	cl->len_bytes += len;
+        q->prio_len_bytes[cl->prio] += len;
 
 	/* sojourn time based ECN marking: TCN and CoDel */
 	if (wfq_ecn_scheme == wfq_tcn || wfq_ecn_scheme == wfq_codel)
@@ -524,8 +548,6 @@ static void wfq_destroy(struct Qdisc *sch)
         {
                 for (i = 0; i < wfq_max_queues && (q->queues[i]).qdisc; i++)
                         qdisc_destroy((q->queues[i]).qdisc);
-
-                kfree(q->queues);
 	}
 	qdisc_watchdog_cancel(&q->watchdog);
 }
@@ -575,19 +597,19 @@ static int wfq_init(struct Qdisc *sch, struct nlattr *opt)
 	if(sch->parent != TC_H_ROOT)
 		return -EOPNOTSUPP;
 
-	q->queues = kcalloc(wfq_max_queues,
-                            sizeof(struct wfq_class),
-                            GFP_KERNEL);
-
-        if (unlikely(!(q->queues)))
-                return -ENOMEM;
-
         q->tokens = 0;
         q->time_ns = ktime_get_ns();
-        q->virtual_time = 0;
         q->sum_len_bytes = 0;
 	qdisc_watchdog_init(&q->watchdog, sch);
 
+        /* Initialize per-priority variables */
+	for (i = 0; i < wfq_max_prio; i++)
+	{
+		q->prio_len_bytes[i] = 0;
+		q->virtual_time[i] = 0;
+	}
+
+	/* Initialize per-queue variables */
 	for (i = 0; i < wfq_max_queues; i++)
 	{
 		/* bfifo is in bytes */
@@ -599,7 +621,6 @@ static int wfq_init(struct Qdisc *sch, struct nlattr *opt)
 		else
 			goto err;
 
-		/* Initialize per-queue variables */
                 (q->queues[i]).id = i;
 		(q->queues[i]).head_fin_time = 0;
                 (q->queues[i]).len_bytes = 0;

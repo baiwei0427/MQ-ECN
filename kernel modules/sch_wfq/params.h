@@ -29,6 +29,9 @@ typedef s32 codel_tdiff_t;
 
 /* Our module has at most 8 queues */
 #define wfq_max_queues 8
+/* Our module supports at most 8 priorities */
+#define wfq_max_prio 8
+
 /*
  * 1538 = MTU (1500B) + Ethernet header(14B) + Frame check sequence (4B) +
  * Frame check sequence(8B) + Interpacket gap(12B)
@@ -67,8 +70,10 @@ typedef s32 codel_tdiff_t;
 
 /* The number of global (rather than 'per-queue') parameters */
 #define wfq_global_params 10
+/* The number of parameters for each queue */
+#define wfq_queue_params 5
 /* The total number of parameters (per-queue and global parameters) */
-#define wfq_total_params (wfq_global_params + 4 * wfq_max_queues)
+#define wfq_total_params (wfq_global_params + wfq_queue_params * wfq_max_queues)
 
 /* Global parameters */
 /* Enable debug mode or not */
@@ -101,6 +106,8 @@ extern int wfq_queue_dscp[wfq_max_queues];
 extern int wfq_queue_weight[wfq_max_queues];
 /* Per queue static reserved buffer (bytes) */
 extern int wfq_queue_buffer_bytes[wfq_max_queues];
+/* Per queue priority (0 to wfq_max_prio - 1) */
+extern int wfq_queue_prio[wfq_max_queues];
 
 struct wfq_param
 {
