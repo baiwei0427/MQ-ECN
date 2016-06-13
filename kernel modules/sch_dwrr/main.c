@@ -65,7 +65,7 @@ struct dwrr_class
 };
 
 /**
- *	struct wfq_sched_data - DWRR scheduler
+ *	struct dwrr_sched_data - DWRR scheduler
  *	@queues: multiple Class of Service (CoS) queues
  *	@rate: shaping rate
  *	@watchdog: watchdog timer for token bucket rate limiter
@@ -93,6 +93,34 @@ struct dwrr_sched_data
 	s64	round_time[dwrr_max_prio];
 	s64	last_idle_time[dwrr_max_prio];
 };
+
+static inline void print_dwrr_sched_data(struct Qdisc *sch)
+{
+        int i;
+	struct dwrr_sched_data *q = qdisc_priv(sch);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "sch_dwrr on %s\n", sch->dev_queue->dev->name);
+        printk(KERN_INFO "rate: %llu Mbps\n", q->rate.rate_bps / 1000000);
+        printk(KERN_INFO "total buffer occupancy: %u\n", q->sum_len_bytes);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "per-queue buffer occupancy\n");
+        for (i = 0; i < dwrr_max_queues; i++)
+                printk(KERN_INFO " queue %d: %u\n", i, q->queues[i].len_bytes);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "per-priority buffer occupancy\n");
+        for (i = 0; i < dwrr_max_prio; i++)
+                printk(KERN_INFO " priority %d: %u\n", i, q->prio_len_bytes[i]);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "per-priority smooth round time\n");
+        for (i = 0; i < dwrr_max_prio; i++)
+                printk(KERN_INFO " priority %d: %llu\n", i, q->round_time[i]);
+
+        printk(KERN_INFO "==========================================");
+}
 
 /* nanosecond to codel time (1 << dwrr_codel_shift ns) */
 static inline codel_time_t ns_to_codel_time(s64 ns)
@@ -644,6 +672,8 @@ static void dwrr_destroy(struct Qdisc *sch)
 			qdisc_destroy((q->queues[i]).qdisc);
 	}
 	qdisc_watchdog_cancel(&q->watchdog);
+	printk(KERN_INFO "destroy sch_dwrr on %s\n", sch->dev_queue->dev->name);
+	print_dwrr_sched_data(sch);
 }
 
 static const struct nla_policy dwrr_policy[TCA_TBF_MAX + 1] = {
@@ -675,8 +705,9 @@ static int dwrr_change(struct Qdisc *sch, struct nlattr *opt)
 	q->rate.rate_bps = (u64)rate << 3;
 	precompute_ratedata(&q->rate);
 	err = 0;
-	printk(KERN_INFO "sch_dwrr: rate %llu Mbps\n",q->rate.rate_bps/1000000);
 
+	printk(KERN_INFO "change sch_dwrr on %s\n", sch->dev_queue->dev->name);
+        print_dwrr_sched_data(sch);
  done:
 	return err;
 }
