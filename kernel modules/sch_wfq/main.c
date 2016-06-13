@@ -81,6 +81,34 @@ struct wfq_sched_data
         u64     virtual_time[wfq_max_prio];
 };
 
+static inline void print_wfq_sched_data(struct Qdisc *sch)
+{
+        int i;
+	struct wfq_sched_data *q = qdisc_priv(sch);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "sch_wfq on %s\n", sch->dev_queue->dev->name);
+        printk(KERN_INFO "rate: %llu Mbps\n", q->rate.rate_bps / 1000000);
+        printk(KERN_INFO "total buffer occupancy: %u\n", q->sum_len_bytes);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "per-queue buffer occupancy\n");
+        for (i = 0; i < wfq_max_queues; i++)
+                printk(KERN_INFO " queue %d: %u\n", i, q->queues[i].len_bytes);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "per-priority buffer occupancy\n");
+        for (i = 0; i < wfq_max_prio; i++)
+                printk(KERN_INFO " priority %d: %u\n", i, q->prio_len_bytes[i]);
+
+        printk(KERN_INFO "==========================================");
+        printk(KERN_INFO "per-priority virtual system time\n");
+        for (i = 0; i < wfq_max_prio; i++)
+                printk(KERN_INFO " priority %d: %llu\n", i, q->virtual_time[i]);
+
+        printk(KERN_INFO "==========================================");
+}
+
 /* return true if time1 is before (smaller) time2 */
 static inline bool wfq_time_before(u64 time1, u64 time2)
 {
@@ -550,6 +578,8 @@ static void wfq_destroy(struct Qdisc *sch)
                         qdisc_destroy((q->queues[i]).qdisc);
 	}
 	qdisc_watchdog_cancel(&q->watchdog);
+        printk(KERN_INFO "destroy sch_wfq on %s\n", sch->dev_queue->dev->name);
+        print_wfq_sched_data(sch);
 }
 
 static const struct nla_policy wfq_policy[TCA_TBF_MAX + 1] = {
@@ -581,8 +611,9 @@ static int wfq_change(struct Qdisc *sch, struct nlattr *opt)
 	q->rate.rate_bps = (u64)rate << 3;
         precompute_ratedata(&q->rate);
 	err = 0;
-	printk(KERN_INFO "sch_wfq: rate %llu Mbps\n", q->rate.rate_bps/1000000);
 
+        printk(KERN_INFO "change sch_wfq on %s\n", sch->dev_queue->dev->name);
+        print_wfq_sched_data(sch);
  done:
 	return err;
 }
