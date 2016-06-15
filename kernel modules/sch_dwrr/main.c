@@ -762,7 +762,7 @@ static int dwrr_init(struct Qdisc *sch, struct nlattr *opt)
 		(q->queues[i]).marking = false;
 		(q->queues[i]).rec_inv_sqrt = 0;
 		(q->queues[i]).first_above_time = 0;
-		(q->queues[i]).mark_next = false;
+		(q->queues[i]).mark_next = 0;
 		(q->queues[i]).ldelay = 0;
 	}
 	return dwrr_change(sch,opt);
